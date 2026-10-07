@@ -5,9 +5,6 @@ import android.app.RemoteInput
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
@@ -28,6 +25,7 @@ import androidx.wear.ambient.AmbientLifecycleObserver
 import androidx.wear.input.RemoteInputIntentHelper
 import io.orbe.watch.gesto.Gesto
 import io.orbe.watch.gesto.Sacudida
+import io.orbe.watch.gesto.SensoresNaFrente
 import io.orbe.watch.gesto.ServicoSacudida
 import io.orbe.watch.gl.Diagnostico
 import io.orbe.watch.gl.Motor
@@ -71,34 +69,35 @@ class MainActivity : ComponentActivity() {
     /** O menu pedido pelo adb (--es menu gaveta, ou o nome de uma aba), para conferir sem tocar no relógio. */
     private val menuPedido = mutableStateOf<String?>(null)
 
-    private val sensores by lazy { getSystemService(SensorManager::class.java) }
-
-    /** Com o orbe aberto, o primeiro pico forte para fora sai na hora, sem esperar a volta do pulso. */
-    private val sair = object : SensorEventListener {
+    /**
+     * Com o orbe aberto, o primeiro pico forte para fora sai na hora, sem esperar
+     * a volta do pulso. Lê do [SensoresNaFrente], na thread dos sensores; o que
+     * mexe na tela volta para a principal.
+     */
+    private val sair = object : SensoresNaFrente.Leitor {
         val sacudida = Sacudida(paradoMs = Sacudida.PARADO_MS).apply { sairNaHora = true }
         var gy = 0f
         var gz = 9.8f
 
-        override fun onSensorChanged(event: SensorEvent) {
+        override fun ler(tipo: Int, tNs: Long, x: Float, y: Float, z: Float) {
             // calibrando, as sacudidas são de propósito e não saem
             if (ServicoSacudida.calibrando) {
                 sacudida.zerar()
                 return
             }
-            when (event.sensor.type) {
+            when (tipo) {
                 Sensor.TYPE_ACCELEROMETER -> {
-                    gy += (event.values[1] - gy) * ALFA_GRAVIDADE
-                    gz += (event.values[2] - gz) * ALFA_GRAVIDADE
+                    gy += (y - gy) * ALFA_GRAVIDADE
+                    gz += (z - gz) * ALFA_GRAVIDADE
                     sacudida.gravidade(gy, gz)
                 }
                 Sensor.TYPE_GYROSCOPE -> {
                     // o fora calibrado vale na próxima sacudida, sem religar os sensores
                     sacudida.sairForaMin = vm.ajustes.value.sairFora
-                    val (x, y, z) = event.values
-                    val gesto = sacudida.ler(event.timestamp / 1_000_000, x, sqrt(x * x + y * y + z * z))
+                    val gesto = sacudida.ler(tNs / 1_000_000, x, sqrt(x * x + y * y + z * z))
                     sacudida.tirarResumo()?.let { Log.d(TAG, "na tela: $it") }
                     if (gesto == Gesto.SAIR) {
-                        if (!vm.ajustes.value.batidas) sairPelaSacudida()
+                        if (!vm.ajustes.value.batidas) janela.post { sairPelaSacudida() }
                         else {
                             // o estalo gira o pulso como a sacudida de sair: espera a janela
                             // da batida fechar (~270 ms do pico) e só sai se não foi estalo
@@ -113,8 +112,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
     }
 
     private val janela = android.os.Handler(android.os.Looper.getMainLooper())
@@ -126,13 +123,16 @@ class MainActivity : ComponentActivity() {
         moveTaskToBack(true)
     }
 
-    private fun ligarSair(ligar: Boolean) {
-        val s = sensores ?: return
-        s.unregisterListener(sair)
-        if (!ligar) return
-        sair.sacudida.zerar()
-        s.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { s.registerListener(sair, it, SensorManager.SENSOR_DELAY_UI) }
-        s.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let { s.registerListener(sair, it, SensorManager.SENSOR_DELAY_GAME) }
+    private var inscricaoSair: SensoresNaFrente.Inscricao? = null
+
+    /** [lote]: null desliga; senão, o lote máximo da inscrição em µs (0 = cada amostra na hora). */
+    private fun ligarSair(lote: Int?) {
+        inscricaoSair?.let(SensoresNaFrente::sair)
+        inscricaoSair = null
+        if (lote == null) return
+        // as taxas de sempre do sair: acelerômetro no ritmo da tela, giroscópio no de jogo
+        SensoresNaFrente.naLinha { sair.sacudida.zerar() }
+        inscricaoSair = SensoresNaFrente.inscrever(this, sair, SensoresNaFrente.UI_US, SensoresNaFrente.GAME_US, lote)
     }
 
     // o dedo na tela manda tranco pelo pulso: as batidas ficam surdas enquanto ele
@@ -237,10 +237,11 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 try {
-                    combine(vm.ajustes.map { it.sair }, vm.emAmbiente) { sair, amb -> sair && !amb }
-                        .distinctUntilChanged().collect(::ligarSair)
+                    combine(vm.ajustes.map { it.sair to it.sensoresLote }, vm.emAmbiente) { (sair, lote), amb ->
+                        if (sair && !amb) (if (lote) SensoresNaFrente.LOTE_US else 0) else null
+                    }.distinctUntilChanged().collect(::ligarSair)
                 } finally {
-                    ligarSair(false)
+                    ligarSair(null)
                 }
             }
         }
@@ -281,8 +282,30 @@ class MainActivity : ComponentActivity() {
         provisionar(intent)
     }
 
+    // ── memória: 10 s fora da frente, sai o que o orbe em tela não usa; o sistema pedindo, sai tudo ──
+
+    private val liberarFora = Runnable {
+        Motor.liberar(tudo = false)
+        io.orbe.watch.ui.Previas.limpar()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // abaixo de UI_HIDDEN (que vem sempre ao sair) é o sistema apertado de memória
+        @Suppress("DEPRECATION")
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ||
+            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+        ) {
+            Log.i(TAG, "memória: o sistema pediu (nível $level)")
+            janela.removeCallbacks(liberarFora)
+            Motor.liberar(tudo = true)
+            io.orbe.watch.ui.Previas.limpar()
+        }
+    }
+
     override fun onStart() {
         super.onStart()
+        janela.removeCallbacks(liberarFora)
         ServicoSacudida.orbeNaFrente = true
         mexeuEm = SystemClock.uptimeMillis()
         Diagnostico.verificar(this)
@@ -294,6 +317,7 @@ class MainActivity : ComponentActivity() {
         ServicoSacudida.orbeNaFrente = false
         // fora da frente nada desenha: a orbe-gl dorme até o orbe voltar
         Motor.pausar()
+        janela.postDelayed(liberarFora, LIBERAR_FORA_MS)
         vm.saiu(fechando = isFinishing)
         super.onStop()
     }
@@ -308,6 +332,8 @@ class MainActivity : ComponentActivity() {
         // para medir num relógio de verdade: --ef qualidade 0.75 trava a resolução da máscara
         i?.getFloatExtra("qualidade", -1f)?.takeIf { it >= 0f }?.let { Motor.qualidadeFixa = it }
         i?.getStringExtra("menu")?.let { menuPedido.value = it }
+        // o orbe em tela pelo id da skin (anel, ofanim, serafim_gravura...), para medir cada um
+        i?.getStringExtra("skin")?.let { id -> io.orbe.watch.orbe.Skin.entries.firstOrNull { it.id == id }?.let(vm::skin) }
         // as chaves da aba Desempenho, para medir sem tocar no relógio (ver OrbeViewModel.desempenhoPorAdb)
         i?.getStringExtra("desempenho")?.let(vm::desempenhoPorAdb)
         Diagnostico.verificar(this)
@@ -328,6 +354,8 @@ class MainActivity : ComponentActivity() {
         private const val ALFA_GRAVIDADE = 0.2f
         /** abre já numa sessão de voz: a sacudida (do orbe ou do HinaWatch) */
         const val EXTRA_OUVIR = "ouvir"
+        /** fora da frente por isto, sai da memória o que o orbe em tela não usa (a resposta que volta logo não paga nada) */
+        private const val LIBERAR_FORA_MS = 10_000L
         /** os passos do deslocamento do ambiente (px lógicos), em volta do centro */
         private val DESLOCAMENTOS = listOf(0.0 to 0.0, 3.0 to 0.0, 3.0 to 3.0, 0.0 to 3.0, -3.0 to 3.0, -3.0 to 0.0, -3.0 to -3.0, 0.0 to -3.0, 3.0 to -3.0)
     }

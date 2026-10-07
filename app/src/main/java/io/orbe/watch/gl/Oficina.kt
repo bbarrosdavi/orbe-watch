@@ -17,6 +17,8 @@ internal const val TAG = "Orbe"
 /** Um programa ligado, com os locais dos uniforms achados uma vez só. */
 internal class Programa(val id: Int) {
     private val locais = HashMap<String, Int>()
+    /** quando foi pedido por último (nanoTime): o que o orbe em tela usa fica na [Oficina.soltar] */
+    var usadoEm = 0L
 
     fun local(nome: String): Int = locais.getOrPut(nome) { GLES30.glGetUniformLocation(id, nome) }
 
@@ -30,6 +32,12 @@ internal class Programa(val id: Int) {
                 2 -> GLES30.glUniform2f(l, v[0], v[1])
                 4 -> GLES30.glUniform4f(l, v[0], v[1], v[2], v[3])
             }
+            n++
+        }
+        for ((nome, v) in u.vetores) {
+            val l = local(nome)                // o local do vetor é o do elemento 0
+            if (l < 0) continue
+            GLES30.glUniform4fv(l, v.size / 4, v, 0)
             n++
         }
         Diagnostico.gl(n)
@@ -71,6 +79,13 @@ internal class Programa(val id: Int) {
 internal class Oficina(private val ctx: Context) {
     private val programas = HashMap<String, Programa?>()
     private val texturas = HashMap<String, Int>()
+    // quando cada atlas foi pedido por último (nanoTime): o que o orbe em tela usa
+    // fica na [soltar], o resto (as skins por onde a lista passou) sai
+    private val usoTextura = HashMap<String, Long>()
+    // os programas de cada quadro sem montar a chave em texto: por skin e variante
+    private val figuras = HashMap<Skin, HashMap<Map<String, Int>, Programa?>>()
+    private val primitivasPorSkin = HashMap<Skin, Programa?>()
+    private var posPronto: Programa? = null
     private val pasta = File(ctx.cacheDir, "programas").apply { mkdirs() }
     private val gpu: String by lazy {
         listOf(GLES30.GL_VENDOR, GLES30.GL_RENDERER, GLES30.GL_VERSION).joinToString("|") { GLES30.glGetString(it) ?: "" }
@@ -86,19 +101,34 @@ internal class Oficina(private val ctx: Context) {
     }
 
     /** Primeiro passe da skin, na [variante] pedida pela arte; null se o shader não compila nesta GPU. */
-    fun figura(skin: Skin, variante: Map<String, Int> = emptyMap()): Programa? =
-        programa(skin.shader, if (variante.isEmpty()) skin.definicoes else skin.definicoes + variante)
+    fun figura(skin: Skin, variante: Map<String, Int> = emptyMap()): Programa? {
+        val porVariante = figuras.getOrPut(skin) { HashMap() }
+        val p = if (porVariante.containsKey(variante)) porVariante[variante]
+        else programa(skin.shader, if (variante.isEmpty()) skin.definicoes else skin.definicoes + variante)
+            .also { porVariante[variante] = it }
+        p?.usadoEm = System.nanoTime()
+        return p
+    }
 
     /**
      * O primeiro passe das skins desenhadas por elemento (o Ophanim): o próprio
      * figura.frag é o vértice (VERTICE) e o fragmento (PRIMITIVAS); ver o fim do
      * arquivo. null nas outras skins ou se não compila nesta GPU.
      */
-    fun primitivas(skin: Skin): Programa? =
-        if (!skin.primitivas) null else programa(skin.shader, skin.definicoes + ("PRIMITIVAS" to 1), comVertice = true)
+    fun primitivas(skin: Skin): Programa? {
+        if (!skin.primitivas) return null
+        val p = if (primitivasPorSkin.containsKey(skin)) primitivasPorSkin[skin]
+        else programa(skin.shader, skin.definicoes + ("PRIMITIVAS" to 1), comVertice = true).also { primitivasPorSkin[skin] = it }
+        p?.usadoEm = System.nanoTime()
+        return p
+    }
 
     /** Segundo passe: cor, glitch e sombra. */
-    fun pos(): Programa? = programa("pos.frag", emptyMap())
+    fun pos(): Programa? {
+        val p = posPronto ?: programa("pos.frag", emptyMap()).also { posPronto = it }
+        p?.usadoEm = System.nanoTime()
+        return p
+    }
 
     private fun programa(arquivo: String, definicoes: Map<String, Int>, comVertice: Boolean = false): Programa? {
         val chave = arquivo + definicoes
@@ -217,15 +247,50 @@ internal class Oficina(private val ctx: Context) {
     private fun sha1(s: String): String =
         MessageDigest.getInstance("SHA-1").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }
 
+    /**
+     * Solta os programas e os atlas que não foram pedidos desde [antesDe]
+     * (nanoTime; Long.MAX_VALUE solta tudo). Os programas voltam do cache de
+     * binários em poucos ms; um atlas volta do PNG, decodificado fora desta
+     * thread ([Motor.prepararArte]) quando a página da skin aparece. O que não
+     * compilou nesta GPU fica marcado, para não tentar de novo.
+     */
+    fun soltar(antesDe: Long): Pair<Int, Int> {
+        var nt = 0
+        val ft = texturas.entries.iterator()
+        while (ft.hasNext()) {
+            val (nome, id) = ft.next()
+            if ((usoTextura[nome] ?: 0L) >= antesDe) continue
+            if (id != 0) GLES30.glDeleteTextures(1, intArrayOf(id), 0)
+            ft.remove()
+            usoTextura.remove(nome)
+            Motor.atlasSolto(nome)
+            nt++
+        }
+        var np = 0
+        val fp = programas.values.iterator()
+        while (fp.hasNext()) {
+            val p = fp.next() ?: continue
+            if (p.usadoEm >= antesDe) continue
+            GLES30.glDeleteProgram(p.id)
+            fp.remove()
+            np++
+        }
+        // os atalhos apontavam para os soltos: refeitos pelo programa(), que acha os que ficaram
+        figuras.clear()
+        primitivasPorSkin.clear()
+        posPronto = null
+        return nt to np
+    }
+
     /** Atlas da skin (0 se ela não tem), com mipmap: o glow do anel e a redução das gravuras leem os níveis baixos. */
     fun textura(skin: Skin): Int {
         val nome = skin.arte ?: return 0
+        usoTextura[nome] = System.nanoTime()
         texturas[nome]?.let { return it }
         var id = 0
         try {
-            val op = BitmapFactory.Options().apply { inSampleSize = skin.reducao; inScaled = false }
-            val bmp = ctx.assets.open("arte/$nome").use { BitmapFactory.decodeStream(it, null, op) }
-                ?: error("não decodificou")
+            // decodificado fora desta thread quando a página da skin apareceu; senão, aqui
+            val bmp = Motor.arteDecodificada(nome) ?: decodificar(ctx, skin)
             val ids = IntArray(1)
             GLES30.glGenTextures(1, ids, 0)
             id = ids[0]
@@ -241,6 +306,17 @@ internal class Oficina(private val ctx: Context) {
             Log.e(TAG, "atlas $nome: ${e.message}")
         }
         texturas[nome] = id
+        Motor.atlasCarregado(nome)
         return id
+    }
+
+    companion object {
+        /** O PNG do atlas da [skin], com a redução dela (sem GL: roda em qualquer thread). */
+        fun decodificar(ctx: Context, skin: Skin): android.graphics.Bitmap {
+            val nome = requireNotNull(skin.arte)
+            val op = BitmapFactory.Options().apply { inSampleSize = skin.reducao; inScaled = false }
+            return ctx.assets.open("arte/$nome").use { BitmapFactory.decodeStream(it, null, op) }
+                ?: error("não decodificou")
+        }
     }
 }

@@ -257,6 +257,86 @@ internal object Motor {
         }
     }
 
+    // ── memória: o que sai com o app fora da frente, e os atlas decodificados fora da orbe-gl ──
+
+    /**
+     * Solta da GPU o que o orbe em tela não usa: os atlas e os programas das
+     * skins por onde a lista passou ([tudo] = false, 10 s depois de o app sair
+     * da frente), ou tudo, máscaras inclusive ([tudo] = true, o sistema pedindo
+     * memória). O contexto fica; o que voltar a ser pedido é refeito.
+     */
+    fun liberar(tudo: Boolean) {
+        handler?.post {
+            val of = oficina ?: return@post
+            if (contexto == EGL14.EGL_NO_CONTEXT) return@post
+            EGL14.eglMakeCurrent(tela, reserva, reserva, contexto)
+            val (nt, np) = of.soltar(if (tudo) Long.MAX_VALUE else System.nanoTime() - USO_RECENTE_NS)
+            if (tudo) alvos.forEach {
+                it.m.soltar()
+                it.desenhadoEm = 0L       // a máscara é refeita no próximo quadro dele
+            }
+            synchronized(decodificadas) { decodificadas.clear() }
+            Log.i(TAG, "memória: soltos $nt atlas e $np programas${if (tudo) " e as máscaras" else ""}")
+        }
+    }
+
+    private const val USO_RECENTE_NS = 2_000_000_000L
+    private val decodificador = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "orbe-arte").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+        }
+    }
+    /** atlas decodificados (ou a caminho), na ordem do pedido: no máximo [DECODIFICADAS] esperando */
+    private val decodificadas = LinkedHashMap<String, java.util.concurrent.Future<Bitmap?>>()
+    private const val DECODIFICADAS = 2
+    /** os atlas já na GPU (escritos na orbe-gl, lidos na principal) */
+    private val carregados = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Decodifica o PNG do atlas da [skin] numa thread de baixa prioridade, para
+     * a orbe-gl só subir a textura quando a página da skin entrar: sem isso a
+     * decodificação (uns 150 ms no relógio) parava o quadro em que ela aparecia.
+     */
+    fun prepararArte(ctx: Context, skin: Skin) {
+        val nome = skin.arte ?: return
+        if (nome in carregados) return
+        val app = ctx.applicationContext
+        synchronized(decodificadas) {
+            if (decodificadas.containsKey(nome)) return
+            decodificadas[nome] = decodificador.submit<Bitmap?> {
+                try {
+                    Oficina.decodificar(app, skin)
+                } catch (e: Exception) {
+                    Log.w(TAG, "atlas $nome: ${e.message}")
+                    null
+                }
+            }
+            // a lista rolada depressa pede várias: só as últimas ficam esperando na memória
+            while (decodificadas.size > DECODIFICADAS) {
+                val velho = decodificadas.keys.first()
+                // já decodificando: o bitmap sai na própria fila, sem a principal esperar por ele
+                decodificadas.remove(velho)?.let { f ->
+                    if (!f.cancel(false)) decodificador.execute { runCatching { f.get() }.getOrNull()?.recycle() }
+                }
+            }
+        }
+    }
+
+    /** O atlas já decodificado (esperando o resto, se está a caminho); null se não foi pedido. */
+    internal fun arteDecodificada(nome: String): Bitmap? {
+        val f = synchronized(decodificadas) { decodificadas.remove(nome) } ?: return null
+        return runCatching { f.get() }.getOrNull()
+    }
+
+    internal fun atlasCarregado(nome: String) {
+        carregados += nome
+    }
+
+    internal fun atlasSolto(nome: String) {
+        carregados -= nome
+    }
+
     /** Algum orbe à vista ainda anda (ou nunca foi desenhado), ou há prévia na fila. */
     private fun precisa(): Boolean {
         if (previas.isNotEmpty()) return true
@@ -659,7 +739,16 @@ internal object Motor {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, m.textura)
         pos.amostrador("source", 0)
+        // só onde o pos.frag pode pintar (a célula e o alcance do glitch): fora dela ele dá zero,
+        // o mesmo do glClear acima, então a imagem é igual com menos pixels rodando
+        val alcance = RecortePos.calcular(arte.pos, arte.recorte, wl, hl)
+            ?.let { RecortePos.emPx(it, w, h, wl, hl, invertido = saida == 0) }
+        if (alcance != null) {
+            GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+            GLES30.glScissor(alcance[0], alcance[1], alcance[2], alcance[3])
+        }
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
         Diagnostico.gl()
     }
 
