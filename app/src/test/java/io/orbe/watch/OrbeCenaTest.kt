@@ -101,7 +101,7 @@ class OrbeCenaTest {
             val recorte = arte.recorte
             assertEquals(96.0, recorte[0], 1e-6)
             assertTrue(skin.id, recorte[2] <= 96.0)
-            for ((nome, v) in arte.fx.mapa + arte.pos.mapa) for (x in v) assertFalse("${skin.id}: $nome", x.isNaN() || x.isInfinite())
+            for ((nome, v) in arte.fx.mapa + arte.pos.mapa + arte.fx.vetores) for (x in v) assertFalse("${skin.id}: $nome", x.isNaN() || x.isInfinite())
         }
     }
 

@@ -6,6 +6,11 @@ import kotlin.random.Random
 /** Valores de uniform por nome; o Pintor os entrega ao programa a cada quadro. */
 class Uniformes {
     val mapa = HashMap<String, FloatArray>()
+    /** os vetores de vec4 (uniform vec4 X[n]): vão ao programa numa chamada só, não um elemento por vez */
+    val vetores = HashMap<String, FloatArray>()
+
+    /** O vetor [nome] de [n] vec4, para preencher no lugar ([v4em]); o mesmo a cada quadro. */
+    fun vetor(nome: String, n: Int): FloatArray = vetores.getOrPut(nome) { FloatArray(4 * n) }
 
     fun v1(nome: String, a: Double) {
         mapa.getOrPut(nome) { FloatArray(1) }[0] = a.toFloat()
@@ -58,3 +63,9 @@ internal fun uni(a: Double, b: Double) = a + Random.nextDouble() * (b - a)
 internal fun sorteia(n: Int) = Random.nextInt(n)
 internal fun ruido(t: Double, s: Double) =
     sin(t * 1.31 + s) * 0.5 + sin(t * 2.17 + s * 1.7) * 0.3 + sin(t * 0.53 + s * 2.9) * 0.2
+
+/** O elemento [i] (um vec4) do vetor [v]. */
+internal fun v4em(v: FloatArray, i: Int, a: Double, b: Double, c: Double, d: Double) {
+    val o = 4 * i
+    v[o] = a.toFloat(); v[o + 1] = b.toFloat(); v[o + 2] = c.toFloat(); v[o + 3] = d.toFloat()
+}
