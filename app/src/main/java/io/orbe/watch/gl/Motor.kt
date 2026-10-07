@@ -57,8 +57,10 @@ internal object Motor {
         intervaloCalmo = intervalo(parado.coerceIn(5, 60))
         intervaloAtivo = intervalo(ativo.coerceIn(5, 60))
     }
-    /** quanto antes da hora do quadro a thread acorda para pedir o vsync dele */
-    private const val ADIANTAR_MS = 12L
+    /** o intervalo entre vsyncs da tela (lido do display ao abrir; 60 Hz até lá) */
+    @Volatile private var periodoNs = 16_666_667L
+    /** depois do vsync anterior ao do quadro: o pedido cai no intervalo certo mesmo com atraso de agendamento */
+    private const val FOLGA_VSYNC_NS = 3_000_000L
     private const val ESPERA_GPU_NS = 250_000_000L         // o teto da espera pela GPU antes de entregar o quadro
     // Miniaturas desenhadas por quadro, em rodízio. Medido no TicWatch Pro 5: com
     // as cinco do menu no mesmo quadro, a GPU ficava ocupada de uma vez só e a
@@ -347,17 +349,23 @@ internal object Motor {
     }
 
     /**
-     * O próximo quadro: no vsync seguinte, ou, se ainda falta mais de um vsync
-     * para a hora dele (o orbe calmo, a 20 por segundo), a thread dorme até
-     * perto dela em vez de acordar em cada vsync do meio.
+     * O próximo quadro. O vsync dele é o primeiro a partir de [ultimoNs] +
+     * [intervalo] (os vsyncs andam de [periodoNs] em [periodoNs] a partir do
+     * último quadro). A thread dorme até logo depois do vsync anterior a esse e
+     * só então pede o vsync, em vez de acordar em cada vsync do meio. A conta é
+     * pelo relógio de agora: o quadro que levou 24 ms para desenhar (o Ophanim)
+     * já gastou parte da espera, e contar do começo dele pulava um vsync.
      */
-    private fun agendar(agoraNs: Long, intervalo: Long) {
-        val faltaMs = (ultimoNs + intervalo - agoraNs) / 1_000_000
-        if (previas.isEmpty() && faltaMs > ADIANTAR_MS + 8) {
-            Choreographer.getInstance().postFrameCallbackDelayed(aoVsync, faltaMs - ADIANTAR_MS)
-        } else {
-            Choreographer.getInstance().postFrameCallback(aoVsync)
+    private fun agendar(intervalo: Long) {
+        val c = Choreographer.getInstance()
+        if (previas.isNotEmpty()) {
+            c.postFrameCallback(aoVsync)       // a prévia usa os vsyncs livres
+            return
         }
+        val vsyncs = (intervalo + periodoNs - 1) / periodoNs
+        val alvo = ultimoNs + vsyncs * periodoNs
+        val esperaMs = (alvo - periodoNs + FOLGA_VSYNC_NS - System.nanoTime()) / 1_000_000
+        if (esperaMs > 0) c.postFrameCallbackDelayed(aoVsync, esperaMs) else c.postFrameCallback(aoVsync)
     }
 
     fun redimensionar(view: OrbeView, w: Int, h: Int) {
@@ -416,6 +424,9 @@ internal object Motor {
         EGL14.eglMakeCurrent(tela, reserva, reserva, contexto)
         oficina = Oficina(app)
         guardado = app.getSharedPreferences("motor", Context.MODE_PRIVATE)
+        app.getSystemService(android.hardware.display.DisplayManager::class.java)
+            ?.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.refreshRate
+            ?.takeIf { it in 20f..240f }?.let { periodoNs = (1e9 / it).toLong() }
 
         // o quadrado dos dois passes
         val v = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
@@ -454,7 +465,7 @@ internal object Motor {
         val intervalo = if (calmo) intervaloCalmo else intervaloAtivo
         if (!forcado && ultimoNs != 0L && agoraNs - ultimoNs < intervalo) {
             umaPrevia()              // o vsync em que os orbes não desenham
-            agendar(agoraNs, intervalo)
+            agendar(intervalo)
             return
         }
         umaVez = false
@@ -495,7 +506,7 @@ internal object Motor {
         if (!grande) grandeDesde = 0L else if (grandeDesde == 0L) grandeDesde = agoraNs
         if (grande && previas.isEmpty() && agoraNs - grandeDesde >= AQUECIMENTO_NS && !forcado) avaliar(agoraNs, passou, intervalo)
         else janelaDesde = 0L
-        agendar(agoraNs, intervalo)
+        agendar(intervalo)
     }
 
     /** Um quadro da primeira prévia da fila, lido da GPU para um Bitmap. */
