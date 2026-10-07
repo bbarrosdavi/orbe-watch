@@ -62,6 +62,8 @@ enum class Aba(val nome: String, val icone: Int, val descricao: String) {
     VOZ("Voz", R.drawable.ic_voz, ""),
     /** o que abre, conduz e fecha a sessão: os toques no orbe e as sacudidas */
     ATIVACAO("Gestos", R.drawable.ic_ativacao, ""),
+    /** o que gasta bateria, cada coisa com a sua chave */
+    DESEMPENHO("Desempenho", R.drawable.ic_desempenho, "Bateria e fluidez. Em sessão a tela nunca apaga."),
 }
 
 /** Altura do orbe no alto da gaveta: com as duas fileiras de botões, a gaveta cabe na tela sem rolar. */
@@ -166,7 +168,8 @@ fun TelaAjustes(
                             Miniatura(topo, Modifier.size(largura, ALTURA_TOPO))
                             Texto("ORBE", Estilo.mono.copy(letterSpacing = 3.sp), cor = Estilo.texto.alfa(0.6f))
                         }
-                        Aba.entries.chunked(2).forEach { fileira ->
+                        // duas fileiras na tela redonda: de dois em dois até quatro, de três com mais
+                        Aba.entries.chunked(if (Aba.entries.size > 4) 3 else 2).forEach { fileira ->
                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 fileira.forEach { b -> BotaoGaveta(b.icone, b.nome) { abrir(b) } }
                             }
@@ -197,11 +200,51 @@ fun TelaAjustes(
                                 sessao(vm, ajustes, retrato, ligacao is Ligacao.Conectada, podeGravar)
                                 gestos(vm, ajustes, pedirMicrofone, calibrar)
                             }
+                            Aba.DESEMPENHO -> desempenho(vm, ajustes)
                         }
                     }
                 }
             }
         }
+    }
+}
+
+private fun MenuEscopo.desempenho(vm: OrbeViewModel, ajustes: Ajustes) {
+    grupo("Tela")
+    linha {
+        LinhaSwitch("Tela sempre acesa", ajustes.telaAcesa, subtitulo = "com o app na frente · o que mais gasta") { vm.telaAcesa(it) }
+    }
+    linha {
+        Linha(
+            "Apagar fora de sessão",
+            subtitulo = when (val t = ajustes.telaTempo) {
+                0 -> "no tempo do sistema"
+                in 1 until 60 -> "$t s depois do último toque"
+                else -> "${t / 60} min depois do último toque"
+            },
+            ativo = !ajustes.telaAcesa,
+            aoClicar = { vm.proximoTempoTela() },
+        )
+    }
+    linha {
+        LinhaSwitch("Ambiente", ajustes.ambiente, subtitulo = "ao escurecer, o orbe fica apagado na tela") { vm.usarAmbiente(it) }
+    }
+    grupo("Animação", "Quadros por segundo do orbe.")
+    duas(
+        listOf(
+            @Composable { Linha("Parado", subtitulo = "${ajustes.quadrosParado} por segundo", aoClicar = { vm.proximosQuadrosParado() }) },
+            @Composable { Linha("Em sessão", subtitulo = "${ajustes.quadrosAtivo} por segundo", aoClicar = { vm.proximosQuadrosAtivo() }) },
+        ),
+    )
+    grupo("Sensores e rede")
+    linha {
+        LinhaSwitch("Sensores em lote", ajustes.sensoresLote, subtitulo = "menos despertares · gesto até 0,1 s mais lento") { vm.sensoresLote(it) }
+    }
+    linha {
+        LinhaSwitch("Ponte dorme parada", ajustes.ponteParada, subtitulo = "2 min sem sessão · o toque reconecta") { vm.ponteParada(it) }
+    }
+    linha {
+        LinhaSwitch("Espera leve", ajustes.esperaLeve, subtitulo = "a resposta fora da tela sem segurar a CPU") { vm.esperaLeve(it) }
     }
 }
 

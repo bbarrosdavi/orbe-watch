@@ -24,10 +24,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.wear.ambient.AmbientLifecycleObserver
 import androidx.wear.input.RemoteInputIntentHelper
 import io.orbe.watch.gesto.Gesto
 import io.orbe.watch.gesto.Sacudida
 import io.orbe.watch.gesto.ServicoSacudida
+import io.orbe.watch.gl.Diagnostico
 import io.orbe.watch.gl.Motor
 import io.orbe.watch.ui.Campo
 import io.orbe.watch.ui.GiroCoroa
@@ -35,6 +37,7 @@ import io.orbe.watch.ui.OrbeApp
 import kotlin.math.sqrt
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -136,16 +139,89 @@ class MainActivity : ComponentActivity() {
     // está lá e um pouco depois de sair
     override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
         io.orbe.watch.gesto.TelaTocada.surdoAte = android.os.SystemClock.elapsedRealtime() + 400
+        mexeu()
         return super.dispatchTouchEvent(ev)
     }
 
+    // ── a tela: acesa com a chave, sempre em sessão, e pelo tempo escolhido depois do último toque ──
+    //
+    // Abaixar ou virar o pulso ainda apaga: o ungaze do Wear OS põe o relógio para
+    // dormir como o botão ("Going to sleep due to sleep_button" junto do GESTURE
+    // UNGAZE no log), e isso passa por cima da trava. Com o ambiente, o app fica.
+
+    private var mexeuEm = 0L
+    private var telaPresa = false
+    private val reavaliarTela = Runnable { aplicarTela() }
+
+    private fun mexeu() {
+        mexeuEm = SystemClock.uptimeMillis()
+        // presa pelo tempo, a conta segue no reavaliar já marcado; solta, o toque volta a prender
+        if (!telaPresa && vm.ajustes.value.telaTempo > 0) aplicarTela()
+        vm.mexeu()
+    }
+
+    private fun aplicarTela() {
+        val a = vm.ajustes.value
+        val resta = if (a.telaTempo > 0) mexeuEm + a.telaTempo * 1000L - SystemClock.uptimeMillis() else 0L
+        val presa = a.telaAcesa || vm.emSessao.value || resta > 0
+        if (presa != telaPresa) {
+            telaPresa = presa
+            if (presa) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        janela.removeCallbacks(reavaliarTela)
+        if (!a.telaAcesa && resta > 0) janela.postDelayed(reavaliarTela, resta)
+        Diagnostico.estado = "presa=${if (presa) 1 else 0} ambiente=${if (vm.emAmbiente.value) 1 else 0}"
+    }
+
+    // ── o ambiente: o relógio escurece com o orbe aberto e o app fica nele ──
+
+    private var protegerTela = false
+    private var passoAmbiente = 0
+
+    private val ambiente = AmbientLifecycleObserver(this, object : AmbientLifecycleObserver.AmbientLifecycleCallback {
+        override fun onEnterAmbient(ambientDetails: AmbientLifecycleObserver.AmbientDetails) {
+            if (!vm.ajustes.value.ambiente) {
+                // sem o ambiente, escurecer é sair: o relógio volta ao mostrador, como antes
+                Log.i(TAG, "ambiente desligado nos ajustes: de volta ao mostrador")
+                moveTaskToBack(true)
+                return
+            }
+            Log.i(TAG, "ambiente: entrou (proteção da tela: ${ambientDetails.burnInProtectionRequired})")
+            protegerTela = ambientDetails.burnInProtectionRequired
+            passoAmbiente = 0
+            // a sacudida passa ao serviço, que a lê como com a tela apagada (em lote, acordada pela inclinação)
+            ServicoSacudida.orbeNaFrente = false
+            vm.ambiente(true)
+            Motor.congelar(true)
+            aplicarTela()
+        }
+
+        override fun onUpdateAmbient() {
+            if (protegerTela) {
+                // a cada minuto, um passo de poucos px em volta do centro: nenhum pixel aceso fica no lugar
+                val d = DESLOCAMENTOS[passoAmbiente++ % DESLOCAMENTOS.size]
+                vm.cena.deslocX = d.first
+                vm.cena.deslocY = d.second
+            }
+            Motor.umQuadro()
+        }
+
+        override fun onExitAmbient() {
+            Log.i(TAG, "ambiente: saiu")
+            vm.cena.deslocX = 0.0
+            vm.cena.deslocY = 0.0
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) ServicoSacudida.orbeNaFrente = true
+            vm.ambiente(false)
+            Motor.congelar(false)
+            mexeuEm = SystemClock.uptimeMillis()
+            aplicarTela()
+        }
+    })
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Na frente, a tela não apaga pelo tempo sem toque. Abaixar ou virar o
-        // pulso ainda apaga: o ungaze do Wear OS põe o relógio para dormir como
-        // o botão ("Going to sleep due to sleep_button" junto do GESTURE UNGAZE
-        // no log), e isso passa por cima desta trava.
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        lifecycle.addObserver(ambiente)
         provisionar(intent)
         setContent {
             OrbeApp(
@@ -157,15 +233,26 @@ class MainActivity : ComponentActivity() {
                 coroa = coroa,
             )
         }
-        // os sensores do sair só com o orbe na frente e a chave ligada
+        // os sensores do sair só com o orbe na frente, fora do ambiente, e a chave ligada
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 try {
-                    vm.ajustes.map { it.sair }.distinctUntilChanged().collect(::ligarSair)
+                    combine(vm.ajustes.map { it.sair }, vm.emAmbiente) { sair, amb -> sair && !amb }
+                        .distinctUntilChanged().collect(::ligarSair)
                 } finally {
                     ligarSair(false)
                 }
             }
+        }
+        // a tela: a chave, o tempo e a sessão; a sessão que acaba conta como o último toque
+        lifecycleScope.launch {
+            var antes = false
+            combine(vm.ajustes.map { it.telaAcesa to it.telaTempo }.distinctUntilChanged(), vm.emSessao) { _, s -> s }
+                .collect { sessao ->
+                    if (antes && !sessao) mexeuEm = SystemClock.uptimeMillis()
+                    antes = sessao
+                    aplicarTela()
+                }
         }
     }
 
@@ -177,6 +264,8 @@ class MainActivity : ComponentActivity() {
     private val coroa = MutableSharedFlow<GiroCoroa>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        // a coroa também é mexer: a tela conta o tempo a partir dela, e a ponte que dormia acorda
+        mexeu()
         if (ev.action == MotionEvent.ACTION_SCROLL && ev.isFromSource(InputDevice.SOURCE_ROTARY_ENCODER)) {
             // os mesmos pixels que o Compose dá em verticalScrollPixels
             val px = -ev.getAxisValue(MotionEvent.AXIS_SCROLL) *
@@ -195,11 +284,16 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         ServicoSacudida.orbeNaFrente = true
+        mexeuEm = SystemClock.uptimeMillis()
+        Diagnostico.verificar(this)
+        Motor.retomar()
         vm.entrou()
     }
 
     override fun onStop() {
         ServicoSacudida.orbeNaFrente = false
+        // fora da frente nada desenha: a orbe-gl dorme até o orbe voltar
+        Motor.pausar()
         vm.saiu(fechando = isFinishing)
         super.onStop()
     }
@@ -214,6 +308,9 @@ class MainActivity : ComponentActivity() {
         // para medir num relógio de verdade: --ef qualidade 0.75 trava a resolução da máscara
         i?.getFloatExtra("qualidade", -1f)?.takeIf { it >= 0f }?.let { Motor.qualidadeFixa = it }
         i?.getStringExtra("menu")?.let { menuPedido.value = it }
+        // as chaves da aba Desempenho, para medir sem tocar no relógio (ver OrbeViewModel.desempenhoPorAdb)
+        i?.getStringExtra("desempenho")?.let(vm::desempenhoPorAdb)
+        Diagnostico.verificar(this)
     }
 
     /** O teclado do relógio (ou o ditado, ou o do celular pareado) para um campo de texto. */
@@ -231,5 +328,7 @@ class MainActivity : ComponentActivity() {
         private const val ALFA_GRAVIDADE = 0.2f
         /** abre já numa sessão de voz: a sacudida (do orbe ou do HinaWatch) */
         const val EXTRA_OUVIR = "ouvir"
+        /** os passos do deslocamento do ambiente (px lógicos), em volta do centro */
+        private val DESLOCAMENTOS = listOf(0.0 to 0.0, 3.0 to 0.0, 3.0 to 3.0, 0.0 to 3.0, -3.0 to 3.0, -3.0 to 0.0, -3.0 to -3.0, 0.0 to -3.0, 3.0 to -3.0)
     }
 }

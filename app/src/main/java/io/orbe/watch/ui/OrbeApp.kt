@@ -96,13 +96,17 @@ fun OrbeApp(
     // a calibração da sacudida cobre o menu até salvar ou voltar
     var calibrando by remember { mutableStateOf<Calibracao?>(null) }
 
+    // o relógio escureceu com o app aberto: só o orbe, apagado, no preto
+    val ambiente by vm.emAmbiente.collectAsStateWithLifecycle()
+
     // as batidas, com o app aberto e fora das calibrações: 1 a 4 toques fracos,
     // ou toques que terminam em estalo, cada sequência com a sua ação
     val modelo = remember(ajustes.batidaFracas, ajustes.batidaFortes, ajustes.batidaNada) {
         ModeloBatida.de(Janela.lista(ajustes.batidaFracas), Janela.lista(ajustes.batidaFortes), Janela.lista(ajustes.batidaNada))
     }
     BatidasNoPulso(
-        ligado = ajustes.batidas && calibrando == null && modelo.calibrado,
+        // no ambiente a CPU dorme entre os quadros e as batidas não chegariam inteiras
+        ligado = ajustes.batidas && calibrando == null && modelo.calibrado && !ambiente,
         modelo = modelo,
         intervalo = ajustes.batidasIntervalo,
         aoDetectar = vm::avisarBatida,
@@ -114,9 +118,7 @@ fun OrbeApp(
         vm.passosLista.collect { passo -> if (paginas.currentPage == 0 && historico == null) passosOrbe.tryEmit(passo) }
     }
 
-    // com a sessão aberta a tela não apaga no meio da conversa
-    val view = LocalView.current
-    SideEffect { view.keepScreenOn = retrato.visivel }
+    // a tela (acesa com a chave, sempre em sessão, ou pelo tempo dos ajustes) é da MainActivity
 
     // a ponte aceita a fala do relógio: é a hora de pedir o microfone, uma vez só
     val aceitaFala = (ligacao as? Ligacao.Conectada)?.microfone == true
@@ -131,10 +133,11 @@ fun OrbeApp(
         LocalTema provides aparencia.tema,
         LocalRolando provides (paginas.isScrollInProgress || lista.isScrollInProgress),
         LocalFundoMenu provides ajustes.fundoMenu,
+        LocalAmbiente provides ambiente,
     ) {
       Box(Modifier.fillMaxSize().background(Color.Black)) {
-        // sem o fundo atrás do orbe, ele acende junto com a entrada do menu
-        FundoVidro(
+        // sem o fundo atrás do orbe, ele acende junto com a entrada do menu; no ambiente, só o preto
+        if (!ambiente) FundoVidro(
             Modifier.graphicsLayer {
                 val menu = (paginas.currentPage + paginas.currentPageOffsetFraction).coerceIn(0f, 1f)
                 // o papel no orbe (fundo) e no menu (fundoMenu), cada um com a sua chave
@@ -143,7 +146,7 @@ fun OrbeApp(
             menu = false,
         )
         // com o fundo atrás do orbe, um véu o escurece na página dele e some na entrada do menu
-        if (aparencia.fundo) {
+        if (aparencia.fundo && !ambiente) {
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
                     alpha = Aparencia.ESCURO * (1 - (paginas.currentPage + paginas.currentPageOffsetFraction)).coerceIn(0f, 1f)
@@ -251,6 +254,10 @@ fun OrbeApp(
                     }
                 }
             }
+        }
+        // o ambiente com o menu, o histórico ou uma calibração na tela: só o preto (o OLED apagado)
+        if (ambiente && (paginas.currentPage != 0 || historico != null || calibrando != null)) {
+            Box(Modifier.fillMaxSize().background(Color.Black))
         }
       }
     }

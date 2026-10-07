@@ -284,11 +284,12 @@ fun TelaOrbe(
             }
         }
         // por cima da tela, sem tirar largura dos orbes (o scaffold do Wear reservava uma faixa e os tirava do centro)
-        PontosDaLista(nSkins, { paginas.currentPage + paginas.currentPageOffsetFraction }, Modifier.align(Alignment.CenterEnd).padding(end = 2.dp))
+        val ambiente = LocalAmbiente.current
+        if (!ambiente) PontosDaLista(nSkins, { paginas.currentPage + paginas.currentPageOffsetFraction }, Modifier.align(Alignment.CenterEnd).padding(end = 2.dp))
 
         // ── o orbe que quer falar e espera a vez: em miniatura, parado, na diagonal de baixo à direita ──
         val esperas by vm.esperas.collectAsStateWithLifecycle()
-        esperas.firstOrNull()?.let { e ->
+        if (!ambiente) esperas.firstOrNull()?.let { e ->
             val skinE = Skin.entries.firstOrNull { it.id == e.skin } ?: return@let
             val corE = runCatching { Color(android.graphics.Color.parseColor(e.cor)) }.getOrNull() ?: aparencia.tema.accent
             val chave = ChavePrevia(
@@ -306,7 +307,7 @@ fun TelaOrbe(
         val alfaTexto by animateFloatAsState(
             if (comTexto) 1f else 0f, tween(220, delayMillis = if (comTexto) 160 else 0), label = "texto",
         )
-        if (alfaTexto > 0.01f) {
+        if (alfaTexto > 0.01f && !ambiente) {
             val cel = Celula.para(w.toDouble(), h.toDouble(), ajustes.tamanhoDe(aparencia.skin).toDouble(), true)
             val skin = aparencia.skin
             val y0 = (cel.cy + cel.lado * skin.pe * (if (redonda) skin.encolheNoDisco(cel.lado) else 1.0)).toFloat() + 3f
@@ -340,7 +341,7 @@ fun TelaOrbe(
         }
 
         // ── sessão travada: ponto logo acima da figura, com respiro lento ──
-        if (visto.travado && visto.visivel) {
+        if (visto.travado && visto.visivel && !ambiente) {
             val t = remember { mutableLongStateOf(0L) }
             LaunchedEffect(Unit) { while (true) withFrameNanos { t.longValue = it } }
             val cel = Celula.para(w.toDouble(), h.toDouble(), ajustes.tamanhoDe(aparencia.skin).toDouble(), comTexto)
@@ -356,13 +357,15 @@ fun TelaOrbe(
         }
 
         // ── rodapé: o estado da ponte ──
+        val dormindo by vm.ponteDormindo.collectAsStateWithLifecycle()
         val estado = when {
+            dormindo -> "ponte dormindo · toque acorda"
             ligacao is Ligacao.SemServidor -> if (ajustes.servidor.isBlank() || ajustes.token.isBlank()) "sem servidor" else ""
             ligacao is Ligacao.Conectando -> "conectando…"
             ligacao is Ligacao.Falha -> (ligacao as Ligacao.Falha).motivo
             else -> ""
         }
-        Sumir(estado.isNotEmpty() && !comTexto, Modifier.align(Alignment.BottomCenter).padding(bottom = 22.dp)) {
+        Sumir(estado.isNotEmpty() && !comTexto && !ambiente, Modifier.align(Alignment.BottomCenter).padding(bottom = 22.dp)) {
             Texto(
                 estado, Estilo.mono,
                 Modifier.clickable(remember { MutableInteractionSource() }, indication = null, onClick = abrirAjustes),
@@ -645,6 +648,7 @@ internal fun RotuloSessao(
  */
 @Composable
 private fun Rotulo(alto: String, pe: String, cor: Color, modifier: Modifier = Modifier, miniaturas: List<Pair<ChavePrevia, Boolean>> = emptyList()) {
+    if (LocalAmbiente.current) return
     val corTitulo = lerp(cor, Estilo.texto, 0.7f).alfa(0.55f)
     val corPe = Estilo.texto.alfa(0.45f)
     Box(modifier.padding(BORDA_ROTULO)) {

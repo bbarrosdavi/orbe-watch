@@ -145,6 +145,20 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
 
     private var carregado = false
     private var naTela = false
+
+    /** O microfone daqui acompanha uma sessão aberta ([iniciarEscuta]), ou o "trigger" está a caminho. */
+    private val _emEscuta = MutableStateFlow(false)
+
+    /**
+     * Em sessão: aberta no PC (ouvindo, pensando, falando, trabalhando) ou com a
+     * escuta daqui a caminho. A tela não apaga em sessão, com qualquer ajuste.
+     */
+    val emSessao: StateFlow<Boolean> = combine(_retrato, _emEscuta) { r, e -> r.visivel || e }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** O relógio escureceu com o app aberto e ele ficou no ambiente (o orbe parado e apagado). */
+    private val _emAmbiente = MutableStateFlow(false)
+    val emAmbiente: StateFlow<Boolean> = _emAmbiente
     /** mudanças feitas antes de o disco responder */
     private val pendentes = ArrayList<(Ajustes) -> Ajustes>()
 
@@ -167,6 +181,10 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
             pendentes.clear()
             if (_ajustes.value.sacudida) ServicoSacudida.ligar(getApplication())
             if (naTela) conectar()
+        }
+        viewModelScope.launch {
+            // a sessão que acaba recomeça a contagem do orbe parado (a ponte que dorme)
+            emSessao.collect { mexeuEm = android.os.SystemClock.uptimeMillis() }
         }
         viewModelScope.launch {
             // sem a ponte ninguém avisa que a sessão fechou: o orbe volta a esperar
@@ -218,6 +236,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         cena.corTema = ap.corFigura()
         cena.accent = ap.corAnel()
         acertarDono(ap)
+        io.orbe.watch.gl.Motor.ritmo(a.quadrosParado, a.quadrosAtivo)
     }
 
     /** O orbe em tela mostra a sessão só se foi dele que ela abriu. */
@@ -467,21 +486,167 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         a.copy(ordem = lista.map { it.id })
     }
 
+    // ── desempenho (aba Desempenho) ──
+
+    fun telaAcesa(v: Boolean) = mudar { it.copy(telaAcesa = v) }
+
+    fun proximoTempoTela() = mudar { it.copy(telaTempo = seguinte(Ajustes.TEMPOS_TELA, it.telaTempo)) }
+
+    fun usarAmbiente(v: Boolean) = mudar { it.copy(ambiente = v) }
+
+    fun proximosQuadrosParado() = mudar { it.copy(quadrosParado = seguinte(Ajustes.QUADROS_PARADO, it.quadrosParado)) }
+
+    fun proximosQuadrosAtivo() = mudar { it.copy(quadrosAtivo = seguinte(Ajustes.QUADROS_ATIVO, it.quadrosAtivo)) }
+
+    fun sensoresLote(v: Boolean) = mudar { it.copy(sensoresLote = v) }
+
+    fun ponteParada(v: Boolean) {
+        mudar { it.copy(ponteParada = v) }
+        vigiarPonteParada()
+    }
+
+    fun esperaLeve(v: Boolean) = mudar { it.copy(esperaLeve = v) }
+
+    fun proximaRede() {
+        mudar { it.copy(rede = seguinte(Ajustes.REDES, it.rede)) }
+        if (naTela) conectar(forcar = true)
+    }
+
+    private fun <T> seguinte(l: List<T>, v: T): T = l[(l.indexOf(v) + 1).mod(l.size)]
+
+    /**
+     * As chaves da aba Desempenho pelo adb, para medir sem tocar no relógio:
+     *   adb shell am start -n io.orbe.watch/.MainActivity --es desempenho "telaAcesa=0,telaTempo=30,quadrosParado=15"
+     */
+    fun desempenhoPorAdb(texto: String) {
+        val rede = _ajustes.value.rede
+        mudar { a ->
+            var b = a
+            for (par in texto.split(',', ';')) {
+                val kv = par.split('=', limit = 2)
+                if (kv.size != 2) continue
+                val k = kv[0].trim()
+                val v = kv[1].trim()
+                val sim = v == "1" || v.equals("true", ignoreCase = true)
+                val n = v.toIntOrNull()
+                b = when (k) {
+                    "telaAcesa" -> b.copy(telaAcesa = sim)
+                    "telaTempo" -> if (n in Ajustes.TEMPOS_TELA) b.copy(telaTempo = n!!) else b
+                    "ambiente" -> b.copy(ambiente = sim)
+                    "quadrosParado" -> if (n in Ajustes.QUADROS_PARADO) b.copy(quadrosParado = n!!) else b
+                    "quadrosAtivo" -> if (n in Ajustes.QUADROS_ATIVO) b.copy(quadrosAtivo = n!!) else b
+                    "sensoresLote" -> b.copy(sensoresLote = sim)
+                    "ponteParada" -> b.copy(ponteParada = sim)
+                    "esperaLeve" -> b.copy(esperaLeve = sim)
+                    "rede" -> if (v in Ajustes.REDES) b.copy(rede = v) else b
+                    else -> {
+                        android.util.Log.w(io.orbe.watch.gl.Diagnostico.TAG, "chave de desempenho desconhecida: $k")
+                        b
+                    }
+                }
+            }
+            b
+        }
+        android.util.Log.i(io.orbe.watch.gl.Diagnostico.TAG, "ajustes pelo adb: $texto")
+        if (_ajustes.value.rede != rede && naTela) conectar(forcar = true)
+        if (!_ajustes.value.ponteParada) _ponteDormindo.value = false
+        vigiarPonteParada()
+    }
+
+    /**
+     * O relógio escureceu com o app aberto ([entrou] true) ou voltou. No ambiente
+     * o orbe fica parado e apagado; sem sessão a ponte sai (a volta reconecta) e
+     * a sacudida passa ao serviço, que a lê como com a tela apagada; em sessão
+     * tudo segue, e com o agente trabalhando a espera segura a resposta como
+     * se o orbe tivesse saído da tela.
+     */
+    fun ambiente(entrou: Boolean) {
+        if (_emAmbiente.value == entrou) return
+        _emAmbiente.value = entrou
+        cena.ambiente = entrou
+        if (entrou) {
+            if (pedidoNoAr()) esperarAoFundo()
+            else if (!emSessao.value) soltarPonte()
+        } else {
+            if (aoFundo) {
+                aoFundo = false
+                tetoFundo?.cancel()
+                ServicoEspera.desligar(getApplication())
+            }
+            if (carregado && naTela) conectar()
+        }
+    }
+
+    // ── a ponte que sai com o orbe parado ([Ajustes.ponteParada]) ──
+
+    private var ponteParadaJob: Job? = null
+    /** o último toque, giro da coroa ou fim de sessão (uptime): a contagem do orbe parado parte dele */
+    @Volatile private var mexeuEm = 0L
+    private val _ponteDormindo = MutableStateFlow(false)
+    /** A ponte saiu pelo orbe parado: o rodapé diz "dormindo" e o toque reconecta. */
+    val ponteDormindo: StateFlow<Boolean> = _ponteDormindo
+
+    /**
+     * Sem sessão por [Ajustes.PONTE_PARADA_MS] desde o último [mexeu], a ponte
+     * sai. Uma corrotina só, que confere o prazo quando ele vence: o toque não
+     * recomeça nada, só anda o [mexeuEm].
+     */
+    private fun vigiarPonteParada() {
+        if (!_ajustes.value.ponteParada || !naTela) {
+            ponteParadaJob?.cancel()
+            return
+        }
+        if (ponteParadaJob?.isActive == true) return
+        ponteParadaJob = viewModelScope.launch {
+            while (true) {
+                val falta = mexeuEm + Ajustes.PONTE_PARADA_MS - android.os.SystemClock.uptimeMillis()
+                if (falta > 0) {
+                    delay(falta)
+                    continue
+                }
+                if (emSessao.value || aoFundo) {
+                    mexeuEm = android.os.SystemClock.uptimeMillis()
+                    continue
+                }
+                if (ligacao.value !is Ligacao.SemServidor) {
+                    android.util.Log.i(io.orbe.watch.gl.Diagnostico.TAG, "ponte dormindo: orbe parado")
+                    soltarPonte()
+                    _ponteDormindo.value = true
+                }
+                break
+            }
+        }
+    }
+
+    /** Um toque, a coroa, a sacudida: a contagem do orbe parado recomeça, e a ponte que dormia volta. */
+    fun mexeu() {
+        mexeuEm = android.os.SystemClock.uptimeMillis()
+        if (_ponteDormindo.value && naTela) {
+            _ponteDormindo.value = false
+            conectar()
+            vigiarPonteParada()
+        }
+    }
+
     // ── ponte ──
 
     fun entrou() {
         naTela = true
+        mexeuEm = android.os.SystemClock.uptimeMillis()
+        _ponteDormindo.value = false
         if (aoFundo) {
             aoFundo = false
             tetoFundo?.cancel()
             ServicoEspera.desligar(getApplication())
         }
         if (carregado) conectar()
+        vigiarPonteParada()
     }
 
     /** O orbe saiu da tela; [fechando]: o app fechou de vez (o ViewModel e a ponte vão junto). */
     fun saiu(fechando: Boolean = false) {
         naTela = false
+        ponteParadaJob?.cancel()
         pararEscuta()
         // fora da tela, os toques contados não valem mais
         contagem?.cancel()
@@ -954,6 +1119,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
             escutando = true
             sessaoVista = false
         }
+        _emEscuta.value = true
         ponte.enviar("trigger")
         ligarMicDaEscuta()
         tremer()
@@ -983,6 +1149,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         querOuvir = false
         desligarMicDaEscuta()
         synchronized(trava) { escutando = false }
+        _emEscuta.value = false
     }
 
     private fun seguirEscuta(r: Retrato) {
