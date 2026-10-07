@@ -21,6 +21,7 @@ internal class Programa(val id: Int) {
     fun local(nome: String): Int = locais.getOrPut(nome) { GLES30.glGetUniformLocation(id, nome) }
 
     fun aplicar(u: Uniformes) {
+        var n = 0
         for ((nome, v) in u.mapa) {
             val l = local(nome)
             if (l < 0) continue          // a variante desta skin não usa este uniform
@@ -29,22 +30,33 @@ internal class Programa(val id: Int) {
                 2 -> GLES30.glUniform2f(l, v[0], v[1])
                 4 -> GLES30.glUniform4f(l, v[0], v[1], v[2], v[3])
             }
+            n++
         }
+        Diagnostico.gl(n)
     }
 
     fun v1(nome: String, a: Float) {
         val l = local(nome)
-        if (l >= 0) GLES30.glUniform1f(l, a)
+        if (l >= 0) {
+            GLES30.glUniform1f(l, a)
+            Diagnostico.gl()
+        }
     }
 
     fun v4(nome: String, a: Float, b: Float, c: Float, d: Float) {
         val l = local(nome)
-        if (l >= 0) GLES30.glUniform4f(l, a, b, c, d)
+        if (l >= 0) {
+            GLES30.glUniform4f(l, a, b, c, d)
+            Diagnostico.gl()
+        }
     }
 
     fun amostrador(nome: String, unidade: Int) {
         val l = local(nome)
-        if (l >= 0) GLES30.glUniform1i(l, unidade)
+        if (l >= 0) {
+            GLES30.glUniform1i(l, unidade)
+            Diagnostico.gl()
+        }
     }
 }
 
