@@ -57,6 +57,11 @@ internal object Motor {
         intervaloCalmo = intervalo(parado.coerceIn(5, 60))
         intervaloAtivo = intervalo(ativo.coerceIn(5, 60))
     }
+    /** quanto o último quadro levou (0 se nenhum orbe desenhou nele) */
+    private var lacoAnteriorNs = 0L
+    private var ultimaPreviaNs = 0L
+    /** a espera máxima de uma prévia na fila sem vsync livre */
+    private const val PREVIA_ESPERA_NS = 200_000_000L
     /** o intervalo entre vsyncs da tela (lido do display ao abrir; 60 Hz até lá) */
     @Volatile private var periodoNs = 16_666_667L
     /** depois do vsync anterior ao do quadro: o pedido cai no intervalo certo mesmo com atraso de agendamento */
@@ -469,6 +474,11 @@ internal object Motor {
             return
         }
         umaVez = false
+        // quadro lento (o último passou do intervalo menos um vsync): o vsync seguinte é pedido já,
+        // antes de desenhar, e o próximo quadro emenda neste, como sempre foi; pedir só no fim
+        // perdia mais um vsync (o Rei dos Ratos, ~50 ms por quadro, caía de 20 para 17)
+        val pedidoJa = lacoAnteriorNs + periodoNs > intervalo
+        if (pedidoJa) Choreographer.getInstance().postFrameCallback(aoVsync)
         val passou = if (ultimoNs == 0L) 0L else agoraNs - ultimoNs
         ultimoNs = agoraNs
         val t0 = System.nanoTime()
@@ -497,21 +507,25 @@ internal object Motor {
             }
         }
         val lacoNs = System.nanoTime() - t0
+        lacoAnteriorNs = if (n > 0) lacoNs else 0L
         somaLacoMs += lacoNs / 1e6f
         desenhados += n
         Diagnostico.laco(n, lacoNs)
-        if (livre) umaPrevia()
+        // a prévia anda nos vsyncs em que nenhum orbe desenha; sem eles (quadro lento, ou o
+        // agendamento que só acorda na hora do quadro), uma a cada PREVIA_ESPERA_NS, logo depois do orbe
+        if (livre || (previas.isNotEmpty() && agoraNs - ultimaPreviaNs > PREVIA_ESPERA_NS)) umaPrevia()
         // só as janelas com o orbe grande na tela contam para a qualidade dele, e
         // sem prévia no meio: o atraso de um quadro dela não é dele
         if (!grande) grandeDesde = 0L else if (grandeDesde == 0L) grandeDesde = agoraNs
         if (grande && previas.isEmpty() && agoraNs - grandeDesde >= AQUECIMENTO_NS && !forcado) avaliar(agoraNs, passou, intervalo)
         else janelaDesde = 0L
-        agendar(intervalo)
+        if (!pedidoJa) agendar(intervalo)
     }
 
     /** Um quadro da primeira prévia da fila, lido da GPU para um Bitmap. */
     private fun umaPrevia() {
         val p = previas.firstOrNull() ?: return
+        ultimaPreviaNs = System.nanoTime()
         if (p.pedido.cancelado) {
             previas.removeFirst()
             EGL14.eglMakeCurrent(tela, reserva, reserva, contexto)
