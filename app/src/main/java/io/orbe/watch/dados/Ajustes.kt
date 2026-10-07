@@ -35,6 +35,9 @@ enum class AcaoToque(val id: String, val nome: String) {
     RACIOCINIO("raciocinio", "Trocar raciocínio"),
     NADA("nada", "Nada");
 
+    /** precisa da ponte com o PC (as de sessão); trocar de orbe não */
+    val precisaPonte: Boolean get() = this != PROXIMO && this != ANTERIOR && this != NADA && this != FALAR
+
     companion object {
         fun de(id: String?): AcaoToque? = entries.firstOrNull { it.id == id }
         /** um, dois e três toques como sempre foram; quatro, nada */

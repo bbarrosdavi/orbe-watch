@@ -197,6 +197,13 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
                 } else if (querOuvir) {
                     iniciarEscuta()
                 }
+                if (it is Ligacao.Conectada) acaoPendente?.let { (acao, pode, em) ->
+                    acaoPendente = null
+                    if (android.os.SystemClock.uptimeMillis() - em < ACAO_PENDENTE_MS) {
+                        android.util.Log.i("OrbeBatida", "ação ${acao.id}: a ponte voltou, executa")
+                        executar(acao, pode)
+                    }
+                }
             }
         }
     }
@@ -482,8 +489,21 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Um comando das batidas (só com o app aberto): 0 a 3 os toques fracos, 4 a 7 os que terminam em estalo ([io.orbe.watch.gesto.Comando.indice]). */
     fun batida(i: Int, podeGravar: Boolean) {
-        _ajustes.value.batidasAcoes.getOrNull(i)?.let { executar(it, podeGravar) }
+        val acao = _ajustes.value.batidasAcoes.getOrNull(i) ?: return
+        mexeu()                         // a ponte que dormia parada acorda
+        val lig = ligacao.value
+        android.util.Log.i("OrbeBatida", "ação ${acao.id}: ponte ${lig::class.simpleName}, sessão ${if (_retrato.value.visivel) "aberta" else "fechada"}${if (_retrato.value.travado) " (live)" else ""}")
+        if (acao.precisaPonte && lig !is Ligacao.Conectada) {
+            // sem a ponte o comando morria calado depois da vibração da detecção: espera ela voltar
+            acaoPendente = Triple(acao, podeGravar, android.os.SystemClock.uptimeMillis())
+            android.util.Log.i("OrbeBatida", "ação ${acao.id}: esperando a ponte")
+            return
+        }
+        executar(acao, podeGravar)
     }
+
+    /** a ação de uma batida que chegou com a ponte fora (ação, pode gravar, uptime): sai quando ela conectar */
+    private var acaoPendente: Triple<AcaoToque, Boolean, Long>? = null
 
     /** A voz do orbe (no PC) fala [texto]: as instruções da calibração. */
     fun dizer(texto: String) {
@@ -1071,6 +1091,14 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         if (ligacao.value !is Ligacao.Conectada) return
         val r = _retrato.value
         val aberta = r.visivel || escutando
+        val o = when {
+            !aberta -> "abre${if (live || _ajustes.value.live) " no live" else ""}"
+            live && r.travado -> "solta o live"
+            live -> "entra no live"
+            r.estado == Estado.SPEAKING || r.estado == Estado.THINKING || r.estado == Estado.TOOLS -> "interrompe"
+            else -> "nada (sessão ouvindo)"
+        }
+        android.util.Log.i("OrbeBatida", "sessão: $o")
         when {
             !aberta -> abrir(live || _ajustes.value.live, podeGravar)
             live && r.travado -> {
@@ -1264,6 +1292,8 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         val escritas = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
         /** o intervalo mínimo entre duas gravações dos ajustes */
         const val GRAVAR_MS = 300L
+        /** quanto a ação de uma batida espera a ponte voltar */
+        const val ACAO_PENDENTE_MS = 5_000L
         /** blocos de 30 ms do microfone por mensagem da ponte */
         const val AUDIO_JUNTOS = 3
         /** quanto a ponte em casa espera o Wi-Fi acordar antes de sair pelo celular */

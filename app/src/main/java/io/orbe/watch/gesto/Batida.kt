@@ -364,12 +364,13 @@ class Batida(
     }
 
     /** As janelas desde a última vez: na coleta, todas; no uso, as que contaram. */
-    fun tirarJanelas(): List<Janela> = janelas.toList().also { janelas.clear() }
+    fun tirarJanelas(): List<Janela> = if (janelas.isEmpty()) emptyList() else janelas.toList().also { janelas.clear() }
 
-    fun tirarComandos(): List<Comando> = comandos.toList().also { comandos.clear() }
+    fun tirarComandos(): List<Comando> = if (comandos.isEmpty()) emptyList() else comandos.toList().also { comandos.clear() }
 
     /** O que se decidiu de cada candidato, para o log. */
-    fun tirarRegistros(): List<String> = registros.toList().also { registros.clear() }
+    // vazias (quase sempre: são lidas a cada amostra, 100 por segundo), sem criar lista nova
+    fun tirarRegistros(): List<String> = if (registros.isEmpty()) emptyList() else registros.toList().also { registros.clear() }
 
     companion object {
         private const val ANEL = 64
