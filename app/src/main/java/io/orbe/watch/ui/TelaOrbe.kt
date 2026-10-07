@@ -496,6 +496,7 @@ private fun Fileira(
 @Composable
 private fun Orbe(vm: OrbeViewModel, aparencia: Aparencia, atual: Boolean, tamanho: Float, redonda: Boolean, pode: () -> Boolean) {
     val rolando = LocalRolando.current
+    val coberto = LocalCoberto.current
     val densidade = LocalDensity.current.density
     val ctx = androidx.compose.ui.platform.LocalContext.current
     // a página que entra já decodifica o atlas dela fora da orbe-gl
@@ -512,13 +513,13 @@ private fun Orbe(vm: OrbeViewModel, aparencia: Aparencia, atual: Boolean, tamanh
         vizinha.accent = aparencia.corAnel()
     }
     AndroidView(
-        factory = { OrbeView(it, if (atual) vm.cena else vizinha).apply { adaptar = true; parado = !atual || rolando } },
+        factory = { OrbeView(it, if (atual) vm.cena else vizinha).apply { adaptar = true; parado = !atual || rolando || coberto } },
         update = {
             it.cena = if (atual) vm.cena else vizinha
             // a que entra é desenhada uma vez e congela: eram dois orbes
             // grandes por quadro no meio da rolagem. Arrastando para o menu,
             // o orbe também congela: a GPU fica para a tela que anda
-            it.parado = !atual || rolando
+            it.parado = !atual || rolando || coberto       // embaixo do histórico, ninguém o vê
         },
         modifier = Modifier.fillMaxSize().pointerInput(Unit) { tocar(vm, densidade, pode) },
     )

@@ -146,6 +146,8 @@ fun OrbeApp(
         LocalRolando provides (paginas.isScrollInProgress || lista.isScrollInProgress),
         LocalFundoMenu provides ajustes.fundoMenu,
         LocalAmbiente provides ambiente,
+        // o histórico e as calibrações têm fundo próprio e cobrem o orbe inteiro
+        LocalCoberto provides (historico != null || calibrando != null),
         LocalPreviasLiberadas provides (aquecido || paginas.currentPage == 1 || paginas.targetPage == 1),
     ) {
       Box(Modifier.fillMaxSize().background(Color.Black)) {
