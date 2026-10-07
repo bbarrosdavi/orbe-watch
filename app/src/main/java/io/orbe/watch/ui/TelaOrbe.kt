@@ -34,7 +34,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -83,6 +82,7 @@ import io.orbe.watch.orbe.Skin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -95,6 +95,10 @@ import kotlin.math.sqrt
 import androidx.compose.foundation.pager.PagerState as EstadoFileira
 import androidx.compose.foundation.pager.rememberPagerState as lembrarFileira
 import androidx.compose.foundation.pager.VerticalPager as PaginasDaFileira
+
+/** O passo do respiro do ponto da sessão travada (15 por segundo) e o lado do quadrado dele, em dp. */
+private const val PULSO_MS = 66L
+private const val LADO_PULSO = 14.0
 
 /** Mais que isto parado, o dedo está segurando para falar (o segurar_s do daemon). */
 private const val SEGURAR_MS = 350L
@@ -342,17 +346,30 @@ fun TelaOrbe(
 
         // ── sessão travada: ponto logo acima da figura, com respiro lento ──
         if (visto.travado && visto.visivel && !ambiente) {
-            val t = remember { mutableLongStateOf(0L) }
-            LaunchedEffect(Unit) { while (true) withFrameNanos { t.longValue = it } }
+            // o respiro tem período de 3 s: 15 passos por segundo não mostram degrau, e
+            // a janela redesenha 15 vezes por segundo em vez de em todo vsync
+            val t = remember { mutableLongStateOf(System.nanoTime()) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    t.longValue = System.nanoTime()
+                    delay(PULSO_MS)
+                }
+            }
             val cel = Celula.para(w.toDouble(), h.toDouble(), ajustes.tamanhoDe(aparencia.skin).toDouble(), comTexto)
             val skin = aparencia.skin
             val topo = cel.lado * skin.topo * (if (redonda) skin.encolheNoDisco(cel.lado) else 1.0)
             val cor = if (skin.avatar) Estilo.accent else Estilo.anel
-            Canvas(Modifier.fillMaxSize()) {
+            val cy = max(7.0, cel.cy - topo - 8)
+            // só o quadrado do ponto, numa camada própria: o passo do respiro não regrava o resto da tela
+            Canvas(
+                Modifier
+                    .offset((cel.cx - LADO_PULSO / 2).dp, (cy - LADO_PULSO / 2).dp)
+                    .size(LADO_PULSO.dp)
+                    .graphicsLayer(),
+            ) {
                 val pulso = 0.62f + 0.38f * (0.5f + 0.5f * sin(t.longValue / 1e9 * 2.0).toFloat())
-                val c = Offset(cel.cx.toFloat() * density, max(7.0, cel.cy - topo - 8).toFloat() * density)
-                drawCircle(cor.copy(alpha = 0.22f * pulso), 6 * density, c)
-                drawCircle(cor.copy(alpha = 0.90f * pulso), 3 * density, c)
+                drawCircle(cor.copy(alpha = 0.22f * pulso), 6 * density, center)
+                drawCircle(cor.copy(alpha = 0.90f * pulso), 3 * density, center)
             }
         }
 
@@ -480,6 +497,9 @@ private fun Fileira(
 private fun Orbe(vm: OrbeViewModel, aparencia: Aparencia, atual: Boolean, tamanho: Float, redonda: Boolean, pode: () -> Boolean) {
     val rolando = LocalRolando.current
     val densidade = LocalDensity.current.density
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    // a página que entra já decodifica o atlas dela fora da orbe-gl
+    LaunchedEffect(aparencia.skin) { io.orbe.watch.gl.Motor.prepararArte(ctx, aparencia.skin) }
     val vizinha = remember { OrbeCena(entrar = false) }
     SideEffect {
         vizinha.skin = aparencia.skin
