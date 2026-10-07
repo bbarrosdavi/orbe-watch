@@ -13,6 +13,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import io.orbe.watch.gesto.Sacudida
 import io.orbe.watch.orbe.Skin
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 
 /** O que um número de toques no orbe faz: todos curtos ([Ajustes.toques]) ou o último segurado ([Ajustes.segurar]). */
@@ -229,6 +230,13 @@ data class Ajustes(
 
 private val Context.guardado: DataStore<Preferences> by preferencesDataStore("ajustes")
 
+/**
+ * As chaves grandes (o olá do PC com o papel de parede, dezenas de KB, e as
+ * calibrações das batidas) numa loja à parte: o DataStore reescreve o arquivo
+ * inteiro a cada gravação, e cada página do carrossel gravava tudo isso junto.
+ */
+private val Context.guardadoGrande: DataStore<Preferences> by preferencesDataStore("ajustes_grandes")
+
 class Cofre(private val ctx: Context) {
     private object K {
         val servidor = stringPreferencesKey("servidor")
@@ -312,7 +320,13 @@ class Cofre(private val ctx: Context) {
             p[0].takeIf { it.isNotEmpty() }?.let { it to v.coerceIn(Ajustes.TAMANHO_MIN, Ajustes.TAMANHO_MAX) }
         }.toMap()
 
-    val fluxo: Flow<Ajustes> = ctx.guardado.data.map { p ->
+    // o que a loja grande tem por último, para gravar só quando muda
+    private var grandesGravados: List<String>? = null
+
+    /** Uma chave grande: da loja grande, ou da pequena (onde morava antes da separação). */
+    private fun grande(g: Preferences, p: Preferences, k: Preferences.Key<String>): String? = g[k] ?: p[k]
+
+    val fluxo: Flow<Ajustes> = combine(ctx.guardado.data, ctx.guardadoGrande.data) { p, g ->
         val d = Ajustes()
         Ajustes(
             servidor = p[K.servidor] ?: d.servidor,
@@ -339,7 +353,7 @@ class Cofre(private val ctx: Context) {
             etapas = p[K.etapas] ?: d.etapas,
             idiomaEtapas = p[K.idiomaEtapas]?.takeIf { it in Ajustes.IDIOMAS_ETAPAS } ?: d.idiomaEtapas,
             pediuMicrofone = p[K.pediuMicrofone] ?: d.pediuMicrofone,
-            pc = p[K.pc] ?: d.pc,
+            pc = grande(g, p, K.pc) ?: d.pc,
             agentes = lerAgentes(p[K.agentes]),
             t = p[K.t] ?: d.t,
             sacudida = p[K.sacudida] ?: d.sacudida,
@@ -352,9 +366,9 @@ class Cofre(private val ctx: Context) {
             sair = p[K.sair] ?: d.sair,
             sairFora = p[K.sairFora] ?: d.sairFora,
             batidas = p[K.batidas] ?: d.batidas,
-            batidaFracas = p[K.batidaFracas] ?: d.batidaFracas,
-            batidaFortes = p[K.batidaFortes] ?: d.batidaFortes,
-            batidaNada = p[K.batidaNada] ?: d.batidaNada,
+            batidaFracas = grande(g, p, K.batidaFracas) ?: d.batidaFracas,
+            batidaFortes = grande(g, p, K.batidaFortes) ?: d.batidaFortes,
+            batidaNada = grande(g, p, K.batidaNada) ?: d.batidaNada,
             batidasAcoes = p[K.batidasAcoes]?.split(',')?.mapNotNull { AcaoToque.de(it) }?.takeIf { it.size == 8 } ?: d.batidasAcoes,
             batidasIntervalo = p[K.batidasIntervalo] ?: d.batidasIntervalo,
             telaAcesa = p[K.telaAcesa] ?: d.telaAcesa,
@@ -370,6 +384,16 @@ class Cofre(private val ctx: Context) {
     }
 
     suspend fun gravar(a: Ajustes) {
+        val grandes = listOf(a.pc, a.batidaFracas, a.batidaFortes, a.batidaNada)
+        if (grandes != grandesGravados) {
+            ctx.guardadoGrande.edit { g ->
+                g[K.pc] = a.pc
+                g[K.batidaFracas] = a.batidaFracas
+                g[K.batidaFortes] = a.batidaFortes
+                g[K.batidaNada] = a.batidaNada
+            }
+            grandesGravados = grandes
+        }
         ctx.guardado.edit { p ->
             p[K.servidor] = a.servidor
             p[K.token] = a.token
@@ -392,7 +416,7 @@ class Cofre(private val ctx: Context) {
             p[K.etapas] = a.etapas
             p[K.idiomaEtapas] = a.idiomaEtapas
             p[K.pediuMicrofone] = a.pediuMicrofone
-            p[K.pc] = a.pc
+            p.remove(K.pc)
             p[K.agentes] = a.agentes.entries.joinToString(";") { "${it.key}=${it.value}" }
             p[K.t] = a.t
             p[K.sacudida] = a.sacudida
@@ -402,9 +426,9 @@ class Cofre(private val ctx: Context) {
             p.remove(K.historico)
             p[K.sacudidaFora] = a.sacudidaFora
             p[K.batidas] = a.batidas
-            p[K.batidaFracas] = a.batidaFracas
-            p[K.batidaFortes] = a.batidaFortes
-            p[K.batidaNada] = a.batidaNada
+            p.remove(K.batidaFracas)
+            p.remove(K.batidaFortes)
+            p.remove(K.batidaNada)
             p[K.batidasAcoes] = a.batidasAcoes.joinToString(",") { it.id }
             p[K.batidasIntervalo] = a.batidasIntervalo
             p[K.sacudidaDentro] = a.sacudidaDentro

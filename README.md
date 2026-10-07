@@ -125,15 +125,16 @@ puxar para a direita volta um nível, e o botão do relógio também.
 
 | Aba | O que tem |
 |---|---|
-| **Conexão** | Servidor, token e estado da ponte. |
+| **Conexão** | Servidor, token, estado da ponte e a rede por onde ela sai. |
 | **Agentes** | Os orbes, cada um com o nome do agente que controla: tocar num troca o agente dele. Depois, o tamanho do orbe em tela (60% a 130%), a ordem da lista e a aparência: glitch, linhas de TV, fundo atrás do orbe, texto do raciocínio e seguir o orbe do PC. |
 | **Voz** | Microfone do relógio, voz no relógio, voz também no PC, vibrar e falar as etapas. |
 | **Ativação** | A sessão (aberta ou fechada, modo live), a ação de cada número de toques e as duas sacudidas, com calibração. |
+| **Desempenho** | O que gasta bateria, cada coisa com a sua chave: tela sempre acesa (padrão) ou apagar fora de sessão no tempo escolhido, ambiente, quadros por segundo parado e em sessão, sensores em lote, ponte que dorme com o orbe parado e espera leve. Em sessão a tela nunca apaga. |
 
 Tudo que o menu configura também fica no `config.json` do computador, em
 `relogio.ajustes`, e a aba Relógio do app do Orbe edita. Vale a mudança mais
-nova, de qualquer um dos lados. Ficam só no relógio o endereço, o token e o
-orbe em tela.
+nova, de qualquer um dos lados. Ficam só no relógio o endereço, o token, o
+orbe em tela e a aba Desempenho.
 
 ## Agentes e sessões
 
@@ -213,6 +214,12 @@ etapa nunca atropela a resposta.
   `127.0.0.1:8777` no app (vale enquanto o adb estiver conectado).
 - **Fora de casa:** uma VPN (Tailscale, WireGuard) ou um proxy com TLS
   (`wss://`).
+- **Pelo celular, sem o Wi-Fi do relógio:** use o endereço da tailnet do
+  computador (`100.x.y.z` ou `nome.ts.net`) com o Tailscale ligado no celular.
+  Com a rede em **automática** (Conexão → Rede), endereço da LAN prende o Wi-Fi
+  do relógio e endereço da tailnet sai pelo Bluetooth do celular, como no
+  HinaWatch. **Sempre pelo Wi-Fi** e **pelo celular** fixam um dos dois. A
+  linha mostra por onde a ponte saiu.
 
 O token não passa pela rede: a ponte manda um sal e o relógio responde com
 `PBKDF2-HMAC-SHA256(token, sal, 60 000)`. Cinco provas erradas trancam a
@@ -245,12 +252,21 @@ Diagnóstico no relógio:
 
 ```sh
 adb shell setprop log.tag.Orbe VERBOSE                                # quadros, atrasos e máscara a cada 2 s
+adb shell setprop log.tag.OrbeDesempenho DEBUG                        # desempenho a cada 10 s (vale na próxima abertura)
 adb shell am start -n io.orbe.watch/.MainActivity --ef qualidade 0.5 # trava a máscara
 adb shell am start -n io.orbe.watch/.MainActivity --es menu agentes  # abre uma aba do menu
+adb shell am start -n io.orbe.watch/.MainActivity --es skin anel     # o orbe em tela
+adb shell am start -n io.orbe.watch/.MainActivity --es desempenho "telaAcesa=0,telaTempo=30,quadrosParado=15"
 ```
 
-O VERBOSE espera a GPU a cada quadro para medir: volte a `INFO` depois. No
-emulador, o computador é `10.0.2.2`.
+O VERBOSE espera a GPU a cada quadro para medir: volte a `INFO` depois. A
+linha do `OrbeDesempenho` traz os vsyncs que acordaram a thread do desenho,
+os quadros, as chamadas de GL, a CPU de cada thread, a memória e a corrente
+da bateria; ela não espera a GPU. As chaves do `desempenho` são as da aba
+Desempenho: `telaAcesa`, `telaTempo` (0, 30, 60, 120, 300), `ambiente`,
+`quadrosParado` (10, 15, 20, 30), `quadrosAtivo` (20, 30), `sensoresLote`,
+`ponteParada`, `esperaLeve` e `rede` (auto, wifi, celular). No emulador, o
+computador é `10.0.2.2`.
 
 ## Problemas comuns
 

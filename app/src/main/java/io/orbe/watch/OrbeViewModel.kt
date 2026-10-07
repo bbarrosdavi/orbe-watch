@@ -177,7 +177,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
             _ajustes.value = pendentes.fold(cofre.fluxo.first()) { a, f -> f(a) }
             carregado = true
             aplicar(_ajustes.value)
-            if (pendentes.isNotEmpty()) cofre.gravar(_ajustes.value)
+            if (pendentes.isNotEmpty()) gravarJa()
             pendentes.clear()
             if (_ajustes.value.sacudida) ServicoSacudida.ligar(getApplication())
             if (naTela) conectar()
@@ -253,8 +253,33 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         if (novo == _ajustes.value) return
         _ajustes.value = novo
         aplicar(novo)
-        if (carregado) viewModelScope.launch { cofre.gravar(novo) }
+        if (carregado) agendarGravacao()
         enviarAgente()
+    }
+
+    // ── gravar os ajustes: no máximo uma vez a cada GRAVAR_MS, sempre o valor mais novo ──
+    //
+    // Rolar a lista de orbes muda a skin a cada página, e cada mudança gravava o
+    // arquivo inteiro. Agora a primeira mudança marca uma gravação para daqui a
+    // pouco, e as seguintes só esperam por ela; sair da frente grava na hora.
+
+    private var gravacao: Job? = null
+
+    // a ponte também muda os ajustes, na thread da rede: as duas sob o cadeado do mudar
+    @Synchronized
+    private fun agendarGravacao() {
+        if (gravacao?.isActive == true) return
+        gravacao = escritas.launch {
+            delay(GRAVAR_MS)
+            cofre.gravar(_ajustes.value)
+        }
+    }
+
+    /** Grava já o que estiver pendente (o orbe saindo da frente, o app fechando). */
+    @Synchronized
+    private fun gravarJa() {
+        gravacao?.cancel()
+        gravacao = escritas.launch { cofre.gravar(_ajustes.value) }
     }
 
     /**
@@ -514,6 +539,18 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun <T> seguinte(l: List<T>, v: T): T = l[(l.indexOf(v) + 1).mod(l.size)]
 
+    /** Por onde o app sai agora: o Wi-Fi do relógio, o Bluetooth do celular ou a rede celular. */
+    fun transporte(): String {
+        val cm = getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java) ?: return "?"
+        val c = cm.getNetworkCapabilities(cm.boundNetworkForProcess ?: cm.activeNetwork) ?: return "sem rede"
+        return when {
+            c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+            c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "Bluetooth do celular"
+            c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "rede celular"
+            else -> "outra"
+        }
+    }
+
     /**
      * As chaves da aba Desempenho pelo adb, para medir sem tocar no relógio:
      *   adb shell am start -n io.orbe.watch/.MainActivity --es desempenho "telaAcesa=0,telaTempo=30,quadrosParado=15"
@@ -647,6 +684,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
     fun saiu(fechando: Boolean = false) {
         naTela = false
         ponteParadaJob?.cancel()
+        if (gravacao?.isActive == true) gravarJa()
         pararEscuta()
         // fora da tela, os toques contados não valem mais
         contagem?.cancel()
@@ -715,7 +753,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
     private fun esperarAoFundo() {
         aoFundo = true
         trouxe = false
-        ServicoEspera.ligar(getApplication())
+        ServicoEspera.ligar(getApplication(), leve = _ajustes.value.esperaLeve)
         tetoFundo?.cancel()
         tetoFundo = viewModelScope.launch {
             delay(ServicoEspera.TETO_MS)
@@ -749,7 +787,14 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun conectar(forcar: Boolean = false) {
         val a = _ajustes.value
-        val local = Protocolo.local(a.servidor)
+        _ponteDormindo.value = false
+        // "auto": a LAN só responde pelo Wi-Fi do relógio; a tailnet e o resto vão pela rede
+        // que o sistema escolher (com o celular perto, o Bluetooth dele, sem ligar o Wi-Fi)
+        val local = when (a.rede) {
+            "wifi" -> true
+            "celular" -> false
+            else -> Protocolo.local(a.servidor)
+        }
         if (local) rede.prender() else rede.soltar()
         esperaWifi?.cancel()
         if (local && !rede.noWifi) {
@@ -910,14 +955,29 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         cena.olharY = y.toDouble()
     }
 
+    // a fala vai em mensagens de AUDIO_JUNTOS blocos (90 ms), não uma por bloco de 30 ms:
+    // um terço dos envios pelo rádio; a ponte do PC remonta os quadros de qualquer tamanho
+    private val juntos = ByteArray(Microfone.BLOCO * AUDIO_JUNTOS)
+    private var nJuntos = 0
+
     private fun blocoDoMicrofone(pcm: ByteArray, n: Int) {
         synchronized(trava) {
-            if (transmitindo) ponte.enviarAudio(pcm, n)
-            else {
+            if (transmitindo) {
+                if (nJuntos + n > juntos.size) enviarJuntos()
+                pcm.copyInto(juntos, nJuntos, 0, n)
+                nJuntos += n
+                if (nJuntos >= juntos.size) enviarJuntos()
+            } else {
                 preRolo.add(pcm.copyOf(n))
                 if (preRolo.size > 34) preRolo.removeAt(0)      // 1 s
             }
         }
+    }
+
+    /** Manda o que a fala juntou (sob a [trava]): antes do "touch up" e ao parar a escuta, nada fica para trás. */
+    private fun enviarJuntos() {
+        if (nJuntos > 0) ponte.enviarAudio(juntos, nJuntos)
+        nJuntos = 0
     }
 
     /** Parado além do tempo de segurar: o último dos toques contados, segurado ([Ajustes.segurar]). */
@@ -1070,6 +1130,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
     private fun soltarMicrofone() {
         microfone.parar()
         synchronized(trava) {
+            enviarJuntos()
             transmitindo = false
             preRolo.clear()
         }
@@ -1140,6 +1201,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         synchronized(trava) {
             if (!micDaEscuta) return
             micDaEscuta = false
+            enviarJuntos()
             transmitindo = false
             microfone.parar()
         }
@@ -1198,6 +1260,12 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private companion object {
+        /** as gravações dos ajustes: fora do ViewModel, para a última terminar mesmo com o app fechando */
+        val escritas = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        /** o intervalo mínimo entre duas gravações dos ajustes */
+        const val GRAVAR_MS = 300L
+        /** blocos de 30 ms do microfone por mensagem da ponte */
+        const val AUDIO_JUNTOS = 3
         /** quanto a ponte em casa espera o Wi-Fi acordar antes de sair pelo celular */
         const val ESPERA_WIFI = 4_000L
         /** toques dentro disto contam juntos (com o dedo fora); cada número tem a sua ação ([Ajustes.toques], [Ajustes.segurar]) */

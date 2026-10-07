@@ -269,6 +269,14 @@ object Protocolo {
     }
 
     /** A ponte está na rede de casa (IP privado, .lan, .local): só o Wi-Fi do relógio chega bem nela. */
+    /** O servidor está na tailnet (100.64.0.0/10 ou *.ts.net): só responde pelo Tailscale, que com o celular perto vai pelo Bluetooth dele. */
+    fun tailnet(servidor: String): Boolean {
+        val host = url(servidor)?.let { runCatching { java.net.URI(it).host }.getOrNull() }?.lowercase() ?: return false
+        if (host.endsWith(".ts.net")) return true
+        val p = host.split('.').map { it.toIntOrNull() ?: -1 }
+        return p.size == 4 && p.all { it in 0..255 } && p[0] == 100 && p[1] in 64..127
+    }
+
     fun local(servidor: String): Boolean {
         val host = url(servidor)?.let { runCatching { java.net.URI(it).host }.getOrNull() }
             ?.trim('[', ']')?.lowercase() ?: return false

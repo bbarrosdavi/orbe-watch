@@ -190,7 +190,7 @@ fun TelaAjustes(
                             }
                         }
                         when (a) {
-                            Aba.CONEXAO -> conexao(ajustes, ligacao, editar)
+                            Aba.CONEXAO -> conexao(vm, ajustes, ligacao, editar)
                             Aba.AGENTES -> {
                                 agentes(vm, ajustes, aparencia.skin, agentesPc, cartao)
                                 aparencia(vm, ajustes, aparencia.glitch, aparencia.linhas)
@@ -248,7 +248,7 @@ private fun MenuEscopo.desempenho(vm: OrbeViewModel, ajustes: Ajustes) {
     }
 }
 
-private fun MenuEscopo.conexao(ajustes: Ajustes, ligacao: Ligacao, editar: (Campo) -> Unit) {
+private fun MenuEscopo.conexao(vm: OrbeViewModel, ajustes: Ajustes, ligacao: Ligacao, editar: (Campo) -> Unit) {
     linha {
         Linha("Servidor", subtitulo = ajustes.servidor.ifEmpty { "toque para informar" }, aoClicar = { editar(Campo.SERVIDOR) })
     }
@@ -270,6 +270,17 @@ private fun MenuEscopo.conexao(ajustes: Ajustes, ligacao: Ligacao, editar: (Camp
                 },
             )
         }
+    }
+    linha {
+        Linha(
+            "Rede",
+            subtitulo = when (ajustes.rede) {
+                "wifi" -> "sempre pelo Wi-Fi"
+                "celular" -> "pelo celular (tailnet), sem prender o Wi-Fi"
+                else -> "automática: a LAN pelo Wi-Fi, o resto pelo celular"
+            } + (if (ligacao is Ligacao.Conectada) " · agora: ${vm.transporte()}" else ""),
+            aoClicar = { vm.proximaRede() },
+        )
     }
 }
 
