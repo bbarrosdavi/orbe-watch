@@ -7,6 +7,7 @@ androidxLifecycle = "2.11.0"
 wearCompose = "1.7.0"
 wearInput = "1.2.0"
 wear = "1.3.0"
+fragment = "1.8.5"
 coroutines = "1.10.2"
 okhttp = "5.5.0"
 kotlinxSerialization = "1.11.0"
@@ -29,6 +30,8 @@ wear-compose-material3 = { module = "androidx.wear.compose:compose-material3", v
 androidx-wear-input = { module = "androidx.wear:wear-input", version.ref = "wearInput" }
 # o ambiente (AmbientLifecycleObserver): o app fica no relógio escurecido em vez de voltar ao mostrador
 androidx-wear = { module = "androidx.wear:wear", version.ref = "wear" }
+# a androidx.wear traz o fragment 1.2.4, que o lint barra com as APIs de resultado de activity
+androidx-fragment = { module = "androidx.fragment:fragment", version.ref = "fragment" }
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
