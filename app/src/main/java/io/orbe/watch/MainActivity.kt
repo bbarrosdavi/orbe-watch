@@ -293,13 +293,20 @@ class MainActivity : ComponentActivity() {
         super.onTrimMemory(level)
         // abaixo de UI_HIDDEN (que vem sempre ao sair) é o sistema apertado de memória
         @Suppress("DEPRECATION")
-        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ||
-            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
-        ) {
-            Log.i(TAG, "memória: o sistema pediu (nível $level)")
-            janela.removeCallbacks(liberarFora)
-            Motor.liberar(tudo = true)
-            io.orbe.watch.ui.Previas.limpar()
+        when {
+            // fora da frente: sai tudo, as máscaras inclusive
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> {
+                Log.i(TAG, "memória: o sistema pediu (nível $level)")
+                janela.removeCallbacks(liberarFora)
+                Motor.liberar(tudo = true)
+                io.orbe.watch.ui.Previas.limpar()
+            }
+            // na frente, com o relógio apertado (1 GB): só o que o orbe em tela não usa, sem
+            // fazer ele recarregar atlas e máscara no meio da animação
+            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> {
+                Log.i(TAG, "memória: o sistema pediu com o orbe na frente (nível $level)")
+                Motor.liberar(tudo = false)
+            }
         }
     }
 

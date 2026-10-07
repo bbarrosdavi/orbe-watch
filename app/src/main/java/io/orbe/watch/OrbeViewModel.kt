@@ -492,7 +492,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         val acao = _ajustes.value.batidasAcoes.getOrNull(i) ?: return
         mexeu()                         // a ponte que dormia parada acorda
         val lig = ligacao.value
-        android.util.Log.i("OrbeBatida", "ação ${acao.id}: ponte ${lig::class.simpleName}, sessão ${if (_retrato.value.visivel) "aberta" else "fechada"}${if (_retrato.value.travado) " (live)" else ""}")
+        android.util.Log.i("OrbeBatida", "ação ${acao.id}: ponte ${when (lig) { is Ligacao.Conectada -> "conectada"; is Ligacao.Conectando -> "conectando"; is Ligacao.Falha -> "caída"; else -> "desligada" }}, sessão ${if (_retrato.value.visivel) "aberta" else "fechada"}${if (_retrato.value.travado) " (live)" else ""}")
         if (acao.precisaPonte && lig !is Ligacao.Conectada) {
             // sem a ponte o comando morria calado depois da vibração da detecção: espera ela voltar
             acaoPendente = Triple(acao, podeGravar, android.os.SystemClock.uptimeMillis())
