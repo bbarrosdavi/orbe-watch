@@ -82,6 +82,47 @@ private fun parecidas(a: FloatArray, b: FloatArray): Float {
 private const val FOLGA = 3
 
 /**
+ * A forma sem a orientação do pulso: em cada instante, a intensidade da
+ * aceleração e a do giro (a raiz da soma dos três eixos), cada uma com o mesmo
+ * peso. O mesmo estalo com o relógio virado para cima, para você ou para fora
+ * cai em eixos diferentes, mas tem a mesma intensidade.
+ */
+internal fun semOrientacao(f: FloatArray): FloatArray {
+    val m = FloatArray(2 * AMOSTRAS)
+    for (t in 0 until AMOSTRAS) {
+        var a = 0f
+        var g = 0f
+        for (c in 0 until 3) { val v = f[c * AMOSTRAS + t]; a += v * v }
+        for (c in 3 until 6) { val v = f[c * AMOSTRAS + t]; g += v * v }
+        m[t] = sqrt(a); m[AMOSTRAS + t] = sqrt(g)
+    }
+    for (o in intArrayOf(0, AMOSTRAS)) {
+        var n = 0f
+        for (t in 0 until AMOSTRAS) n += m[o + t] * m[o + t]
+        val k = sqrt(n).coerceAtLeast(1e-6f) * 1.41421f
+        for (t in 0 until AMOSTRAS) m[o + t] /= k
+    }
+    return m
+}
+
+/** [parecidas] para as formas sem orientação (2 canais). */
+internal fun parecidasSemOrientacao(a: FloatArray, b: FloatArray): Float {
+    var melhor = -1f
+    for (d in -FOLGA..FOLGA) {
+        var s = 0f
+        for (c in 0 until 2) {
+            val o = c * AMOSTRAS
+            for (t in 0 until AMOSTRAS) {
+                val u = t + d
+                if (u in 0 until AMOSTRAS) s += a[o + t] * b[o + u]
+            }
+        }
+        if (s > melhor) melhor = s
+    }
+    return melhor
+}
+
+/**
  * O perfil aprendido de uma força: as próprias tentativas como exemplos (a
  * semelhança de um gesto é a do exemplo mais parecido, então cada posição do
  * braço calibrada vale por si, sem virar uma média que não parece com nenhuma),
@@ -96,6 +137,20 @@ class Perfil(
     private val giro: ClosedFloatingPointRange<Float>,
 ) {
     fun parecenca(j: Janela) = vizinhos(j.forma, exemplos)
+
+    private val exemplosSemOrientacao by lazy { exemplos.map(::semOrientacao) }
+
+    /** a semelhança sem a orientação do pulso (os dois exemplos mais parecidos, como em [parecenca]) */
+    fun parecencaSemOrientacao(j: Janela): Float {
+        val f = semOrientacao(j.forma)
+        var a = -1f
+        var b = -1f
+        for (e in exemplosSemOrientacao) {
+            val x = parecidasSemOrientacao(f, e)
+            if (x > a) { b = a; a = x } else if (x > b) b = x
+        }
+        return if (b < -0.5f) a else (a + b) / 2
+    }
 
     /** a força da janela na faixa das tentativas, com folga para os lados */
     fun naFaixa(j: Janela) = j.aceleracao in aceleracao && j.giro in giro
@@ -175,8 +230,16 @@ class ModeloBatida(val fraca: Perfil?, val forte: Perfil?, val nada: List<Janela
             fraca?.takeIf { pelaForca != Forca.FORTE }?.let { Forca.FRACA to it },
             forte?.takeIf { pelaForca != Forca.FRACA }?.let { Forca.FORTE to it },
         )
-        val (f, p, s) = candidatos.map { (f, p) -> Triple(f, p, p.parecenca(j)) }.maxBy { it.third }
-        val ruido = (nada.maxOfOrNull { parecidas(it.forma, j.forma) } ?: -1f) + MARGEM_NADA
+        // o estalo se compara sem a orientação do pulso; o toque fraco segue eixo a eixo (calibrado assim)
+        val (f, p, s) = candidatos.map { (f, p) ->
+            Triple(f, p, if (f == Forca.FORTE) p.parecencaSemOrientacao(j) else p.parecenca(j))
+        }.maxBy { it.third }
+        val ruido = (if (f == Forca.FORTE) {
+            val fj = semOrientacao(j.forma)
+            nada.maxOfOrNull { parecidasSemOrientacao(semOrientacao(it.forma), fj) }
+        } else {
+            nada.maxOfOrNull { parecidas(it.forma, j.forma) }
+        } ?: -1f) + MARGEM_NADA
         val limiar = when {
             // o estalo que a força já separou: a forma só confirma (estalos de várias
             // intensidades saem de 0,37 a 0,68 contra os da calibração, e o limiar dela ia ao teto 0,70)

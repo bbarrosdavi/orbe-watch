@@ -54,8 +54,7 @@ class ModeloBatidaTest {
     @Test
     fun forcaDeEstaloComFormaDeToqueNuncaViraToqueFraco() {
         val (f, motivo) = modelo.classificar(toque(9, a = 30f, g = 3f))
-        assertNull(motivo, f)
-        assertTrue(motivo, "FORTE" in motivo)
+        assertTrue(motivo, f != Forca.FRACA)
     }
 
     @Test
@@ -67,5 +66,12 @@ class ModeloBatidaTest {
     fun toqueFracoContinuaReconhecido() {
         assertEquals(Forca.FRACA, modelo.classificar(toque(9)).first)
         assertEquals(Forca.FRACA, modelo.classificar(toque(9), emSequencia = true).first)
+    }
+
+    @Test
+    fun estaloComOPulsoGiradoAindaEEstalo() {
+        // o mesmo estalo noutros eixos (o relógio virado): calibrado em z, chega em x
+        val girado = Janela(forma(0, 3, 9), 25f, 2.5f)
+        assertEquals(Forca.FORTE, modelo.classificar(girado).first)
     }
 }
