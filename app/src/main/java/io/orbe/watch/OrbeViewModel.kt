@@ -901,6 +901,12 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Pede à ponte as sessões passadas do agente do orbe em tela. */
     private fun abrirHistorico() {
+        // o mesmo comando que abre fecha
+        if (_historico.value != null) {
+            fecharHistorico()
+            tremer()
+            return
+        }
         if (ligacao.value !is Ligacao.Conectada) return
         enviarAgente()
         _historico.value = Historico(carregando = true)
@@ -1093,7 +1099,7 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
             live && r.travado -> "solta o live"
             live -> "entra no live"
             r.estado == Estado.SPEAKING || r.estado == Estado.THINKING || r.estado == Estado.TOOLS -> "interrompe"
-            else -> "nada (sessão ouvindo)"
+            else -> "fecha a sessão de voz"
         }
         android.util.Log.i("OrbeBatida", "sessão: $o")
         when {
@@ -1106,6 +1112,13 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
             r.estado == Estado.SPEAKING || r.estado == Estado.THINKING || r.estado == Estado.TOOLS -> {
                 altoFalante.cortar()
                 ponte.enviar("interromper")
+            }
+            // ouvindo: o mesmo gesto que abriu fecha (para de gravar), sem encerrar o agente no PC
+            else -> {
+                pararEscuta()
+                if (r.travado) ponte.enviar("release")
+                ponte.enviar("toggle")
+                tremer()
             }
         }
     }
