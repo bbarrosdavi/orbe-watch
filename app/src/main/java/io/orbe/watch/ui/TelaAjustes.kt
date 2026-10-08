@@ -463,7 +463,8 @@ private fun MenuEscopo.gestos(vm: OrbeViewModel, ajustes: Ajustes, pedirMicrofon
     linha {
         Linha(
             "Intervalo entre toques",
-            subtitulo = "%.1f s, também a espera até o comando".format(ajustes.batidasIntervalo / 1000.0).replace('.', ','),
+            subtitulo = if (ajustes.batidasIntervalo == 0L) "zero: cada toque sai na hora, sem combinações"
+                else "%.1f s, também a espera até o comando".format(ajustes.batidasIntervalo / 1000.0).replace('.', ','),
             ativo = ajustes.batidas,
             aoClicar = { vm.proximoIntervalo() },
         )

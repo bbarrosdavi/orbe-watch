@@ -479,7 +479,8 @@ class Batida(
         const val MAX_VEZES = 4
         const val JUNTAR_MS = 500L               // os toques rápidos do Davi: 300 a 450 ms (pico a pico)
         /** as escolhas do intervalo nos ajustes */
-        val INTERVALOS = listOf(300L, 400L, 500L, 600L, 800L, 1000L)
+        // 0: cada toque é um comando, na hora (sem combinações de toques nem toque com estalo)
+        val INTERVALOS = listOf(0L, 300L, 400L, 500L, 600L, 800L, 1000L)
 
         /** um número só para comparar a força de duas janelas */
         fun forca(j: Janela) = j.aceleracao + j.giro
