@@ -154,8 +154,8 @@ class ModeloBatida(val fraca: Perfil?, val forte: Perfil?, val nada: List<Janela
 
     /**
      * A força do gesto, ou null (não é batida); o texto diz por quê. A classe sai
-     * da força quando ela só cabe numa; o toque fraco exige [PISO_FRACA] mesmo em
-     * sequência ([emSequencia] só vai para o log).
+     * da força quando ela só cabe numa; em sequência ([emSequencia]) o toque
+     * fraco tem a folga [FOLGA_SEQUENCIA].
      */
     fun classificar(j: Janela, emSequencia: Boolean = false): Pair<Forca?, String> {
         if (fraca == null && forte == null) return null to "sem calibração"
@@ -181,8 +181,9 @@ class ModeloBatida(val fraca: Perfil?, val forte: Perfil?, val nada: List<Janela
             // o estalo que a força já separou: a forma só confirma (estalos de várias
             // intensidades saem de 0,37 a 0,68 contra os da calibração, e o limiar dela ia ao teto 0,70)
             f == Forca.FORTE && pelaForca == Forca.FORTE -> minOf(p.limiar, LIMIAR_FORTE_PELA_FORCA)
-            // o toque fraco não afrouxa em sequência: era o que deixava passar a mão se ajeitando
-            f == Forca.FRACA -> maxOf(p.limiar, PISO_FRACA)
+            // o toque fraco volta ao limiar calibrado e à folga do segundo toque em diante (o piso
+            // de 0,55 recusava os toques de verdade, que davam 0,50 a 0,54 no relógio)
+            f == Forca.FRACA && emSequencia -> (p.limiar - FOLGA_SEQUENCIA).coerceAtLeast(0.4f)
             else -> p.limiar
         }
         return when {
@@ -200,8 +201,8 @@ class ModeloBatida(val fraca: Perfil?, val forte: Perfil?, val nada: List<Janela
         const val GATILHO_PADRAO = 0.6f
         /** o limiar de forma do estalo quando a força já o separou de tudo o mais */
         const val LIMIAR_FORTE_PELA_FORCA = 0.40f
-        /** o limiar mínimo de forma do toque fraco, em sequência ou não */
-        const val PISO_FRACA = 0.55f
+        /** quanto o toque seguinte de uma sequência pode ser menos parecido que o primeiro */
+        const val FOLGA_SEQUENCIA = 0.1f
         /** quantas vezes o teto de força do toque fraco já é estalo, mesmo abaixo da faixa calibrada dele */
         const val FORTE_SOBRE_FRACA = 2f
         /** o que não é batida ganha empate com folga: parecido quase igual com os dois, recusa */
