@@ -169,6 +169,8 @@ fun TelaCalibracaoBatida(
             if (janelas.size < TENTATIVAS_BATIDA) {
                 Log.i("OrbeBatida", "calibração $tipo: tentativa acel %.1f giro %.1f".format(g.aceleracao, g.giro))
                 janelas += g
+                // bipe curto: a tentativa contou (a troca de posição e o fim têm o som deles, abaixo)
+                if (janelas.size % POR_POSICAO != 0) SomCalibracao.registro()
                 // tremor que entrou como tentativa sai, e a tentativa volta a faltar
                 val limpas = ModeloBatida.semTremor(janelas.toList())
                 if (limpas.size < janelas.size) {
@@ -179,14 +181,10 @@ fun TelaCalibracaoBatida(
         }
     }
     val pronta = if (nada) restante == 0 else janelas.size >= TENTATIVAS_BATIDA
-    // a voz do orbe diz a posição do braço a cada troca, e o fim
+    // dois tons descendo a cada troca de posição do braço e no fim (a primeira posição não toca)
     val etapa = if (nada) -1 else if (pronta) 99 else janelas.size / POR_POSICAO
     LaunchedEffect(etapa) {
-        when {
-            nada -> Unit
-            pronta -> dizer("Pronto. Pode salvar.")
-            else -> dizer(posicao(janelas.size))
-        }
+        if (!nada && etapa > 0) SomCalibracao.troca()
     }
     val titulo = when (tipo) {
         Calibracao.FRACA -> "calibrar toque"
@@ -392,3 +390,56 @@ private const val ALFA_GRAVIDADE = 0.2f
 
 /** pico mínimo para uma tentativa contar (o dentro no abrir, o fora no sair): abaixo disso é o pulso se ajeitando */
 private const val TENTATIVA_MIN = 5f
+
+/**
+ * Os sinais da calibração das batidas, no alto-falante do relógio, no lugar da
+ * voz do orbe: um bipe curto e grave a cada tentativa registrada e dois tons
+ * descendo para trocar a posição do braço (e no fim). Volume baixo. O
+ * alto-falante balança o relógio um pouco: o detector fica surdo durante o som e
+ * mais 100 ms (TelaTocada.vibrandoAte), para ele não entrar como tentativa.
+ */
+private object SomCalibracao {
+    private const val TAXA = 22050
+    private const val VOLUME = 0.18f
+
+    fun registro() = tocar(listOf(440.0 to 70))
+
+    fun troca() = tocar(listOf(523.0 to 160, 349.0 to 260))
+
+    private fun tocar(notas: List<Pair<Double, Int>>) {
+        val ms = notas.sumOf { it.second } + 40 * (notas.size - 1)
+        io.orbe.watch.gesto.TelaTocada.vibrandoAte = android.os.SystemClock.elapsedRealtime() + ms + 100
+        Thread {
+            try {
+                val amostras = ArrayList<Short>()
+                for ((i, n) in notas.withIndex()) {
+                    val (f, dur) = n
+                    val total = TAXA * dur / 1000
+                    for (k in 0 until total) {
+                        // envelope suave nas pontas: sem estalo no começo e no fim
+                        val env = minOf(1.0, k / (TAXA * 0.008), (total - k) / (TAXA * 0.015))
+                        amostras += (kotlin.math.sin(2 * Math.PI * f * k / TAXA) * env * VOLUME * Short.MAX_VALUE).toInt().toShort()
+                    }
+                    if (i < notas.size - 1) repeat(TAXA * 40 / 1000) { amostras += 0 }
+                }
+                val pcm = amostras.toShortArray()
+                val t = android.media.AudioTrack.Builder()
+                    .setAudioAttributes(android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+                    .setAudioFormat(android.media.AudioFormat.Builder().setSampleRate(TAXA)
+                        .setEncoding(android.media.AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_MONO).build())
+                    .setBufferSizeInBytes(pcm.size * 2)
+                    .setTransferMode(android.media.AudioTrack.MODE_STATIC)
+                    .build()
+                t.write(pcm, 0, pcm.size)
+                t.play()
+                Thread.sleep(ms + 60L)
+                t.release()
+            } catch (e: Exception) {
+                Log.w("OrbeBatida", "som da calibração: ${e.message}")
+            }
+        }.start()
+    }
+}
