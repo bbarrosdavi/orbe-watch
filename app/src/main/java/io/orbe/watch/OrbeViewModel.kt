@@ -197,13 +197,6 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
                 } else if (querOuvir) {
                     iniciarEscuta()
                 }
-                if (it is Ligacao.Conectada) acaoPendente?.let { (acao, pode, em) ->
-                    acaoPendente = null
-                    if (android.os.SystemClock.uptimeMillis() - em < ACAO_PENDENTE_MS) {
-                        android.util.Log.i("OrbeBatida", "ação ${acao.id}: a ponte voltou, executa")
-                        executar(acao, pode)
-                    }
-                }
             }
         }
     }
@@ -487,23 +480,27 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
     /** Passos da lista de orbes pedidos pelas ações (+1 o seguinte, -1 o anterior); o OrbeApp leva à lista, como a coroa. */
     val passosLista = kotlinx.coroutines.flow.MutableSharedFlow<Int>(extraBufferCapacity = 1)
 
-    /** Um comando das batidas (só com o app aberto): 0 a 3 os toques fracos, 4 a 7 os que terminam em estalo ([io.orbe.watch.gesto.Comando.indice]). */
-    fun batida(i: Int, podeGravar: Boolean) {
+    /**
+     * Um comando das batidas (só com o app aberto): 0 a 3 os toques fracos, 4 a 7
+     * os que terminam em estalo ([io.orbe.watch.gesto.Comando.indice]). Só vibra se ele acontece: sem a ponte, uma ação de
+     * sessão não faz nada e o relógio fica quieto (antes vibrava na detecção e o
+     * comando morria calado).
+     */
+    fun batida(i: Int, podeGravar: Boolean, forte: Boolean) {
         val acao = _ajustes.value.batidasAcoes.getOrNull(i) ?: return
-        mexeu()                         // a ponte que dormia parada acorda
         val lig = ligacao.value
-        android.util.Log.i("OrbeBatida", "ação ${acao.id}: ponte ${when (lig) { is Ligacao.Conectada -> "conectada"; is Ligacao.Conectando -> "conectando"; is Ligacao.Falha -> "caída"; else -> "desligada" }}, sessão ${if (_retrato.value.visivel) "aberta" else "fechada"}${if (_retrato.value.travado) " (live)" else ""}")
-        if (acao.precisaPonte && lig !is Ligacao.Conectada) {
-            // sem a ponte o comando morria calado depois da vibração da detecção: espera ela voltar
-            acaoPendente = Triple(acao, podeGravar, android.os.SystemClock.uptimeMillis())
-            android.util.Log.i("OrbeBatida", "ação ${acao.id}: esperando a ponte")
-            return
+        val ponte = when (lig) {
+            is Ligacao.Conectada -> "conectada"
+            is Ligacao.Conectando -> "conectando"
+            is Ligacao.Falha -> "caída"
+            else -> "desligada"
         }
+        val vai = acao != AcaoToque.NADA && acao != AcaoToque.FALAR && (!acao.precisaPonte || lig is Ligacao.Conectada)
+        android.util.Log.i("OrbeBatida", "ação ${acao.id}: ponte $ponte, sessão ${if (_retrato.value.visivel) "aberta" else "fechada"}${if (_retrato.value.travado) " (live)" else ""}${if (vai) "" else ": não executa, não vibra"}")
+        if (!vai) return
+        avisarBatida(forte)
         executar(acao, podeGravar)
     }
-
-    /** a ação de uma batida que chegou com a ponte fora (ação, pode gravar, uptime): sai quando ela conectar */
-    private var acaoPendente: Triple<AcaoToque, Boolean, Long>? = null
 
     /** A voz do orbe (no PC) fala [texto]: as instruções da calibração. */
     fun dizer(texto: String) {
@@ -1258,6 +1255,8 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
      * os toques, dois para os que terminam em estalo.
      */
     fun avisarBatida(forte: Boolean) {
+        // a chave Vibrar vale aqui também (antes o aviso das batidas a ignorava)
+        if (!_ajustes.value.vibrar) return
         // o motor de vibração balança o relógio: o detector fica surdo enquanto vibra
         io.orbe.watch.gesto.TelaTocada.vibrandoAte = android.os.SystemClock.elapsedRealtime() + if (forte) 250 else 150
         try {
@@ -1292,8 +1291,6 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         val escritas = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
         /** o intervalo mínimo entre duas gravações dos ajustes */
         const val GRAVAR_MS = 300L
-        /** quanto a ação de uma batida espera a ponte voltar */
-        const val ACAO_PENDENTE_MS = 5_000L
         /** blocos de 30 ms do microfone por mensagem da ponte */
         const val AUDIO_JUNTOS = 3
         /** quanto a ponte em casa espera o Wi-Fi acordar antes de sair pelo celular */

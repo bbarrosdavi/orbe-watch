@@ -121,9 +121,9 @@ fun OrbeApp(
         modelo = modelo,
         intervalo = ajustes.batidasIntervalo,
         lote = ajustes.sensoresLote,
-        aoDetectar = vm::avisarBatida,
     ) { c ->
-        vm.batida(c.indice, podeGravar())
+        // vibra na execução (vm.batida), não na detecção: comando que não acontece não vibra
+        vm.batida(c.indice, podeGravar(), forte = c.forca == Forca.FORTE)
     }
     // as ações de trocar de orbe (dos toques e das batidas) andam a lista como a coroa
     LaunchedEffect(vm) {
@@ -322,13 +322,11 @@ private const val AQUECER_PREVIAS_MS = 3_000L
 @Composable
 private fun BatidasNoPulso(
     ligado: Boolean, modelo: ModeloBatida, intervalo: Long, lote: Boolean,
-    aoDetectar: (forte: Boolean) -> Unit, aoComando: (Comando) -> Unit,
+    aoComando: (Comando) -> Unit,
 ) {
     val ctx = LocalContext.current
     val acao = remember { arrayOf(aoComando) }
     acao[0] = aoComando
-    val aviso = remember { arrayOf(aoDetectar) }
-    aviso[0] = aoDetectar
     val dono = LocalLifecycleOwner.current
     DisposableEffect(ligado, modelo, intervalo, lote, dono) {
         if (!ligado) return@DisposableEffect onDispose { }
@@ -342,12 +340,10 @@ private fun BatidasNoPulso(
                     batida.acel(tNs / 1_000_000, x, y, z)
                     for (r in batida.tirarRegistros()) Log.i("OrbeBatida", r)
                     batida.tirarJanelas()
-                    // o aviso vibra uma vez, no comando, e já aqui na linha dos sensores:
-                    // a cada toque ele caía em cima do toque seguinte (o detector fica
-                    // surdo enquanto o motor vibra) e a sequência rápida se perdia
+                    // um aviso por comando (não por toque: ele caía em cima do toque seguinte),
+                    // dado pelo vm.batida só se o comando acontece
                     for (c in batida.tirarComandos()) {
                         Log.i("OrbeBatida", "comando ${c.forca} x${c.vezes}")
-                        aviso[0](c.forca == Forca.FORTE)
                         principal.post { acao[0](c) }
                     }
                 }
