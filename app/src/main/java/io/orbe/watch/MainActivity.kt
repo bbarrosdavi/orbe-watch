@@ -1,5 +1,6 @@
 package io.orbe.watch
 
+import io.orbe.watch.dados.Diagnostico
 import android.Manifest
 import android.app.RemoteInput
 import android.content.Intent
@@ -93,7 +94,7 @@ class MainActivity : ComponentActivity() {
                     sacudida.sairForaMin = vm.ajustes.value.sairFora
                     val (x, y, z) = event.values
                     val gesto = sacudida.ler(event.timestamp / 1_000_000, x, sqrt(x * x + y * y + z * z))
-                    sacudida.tirarResumo()?.let { Log.d(TAG, "na tela: $it") }
+                    sacudida.tirarResumo()?.let { Diagnostico.registrar(TAG, "na tela: $it") }
                     if (gesto == Gesto.SAIR) {
                         if (!vm.ajustes.value.batidas) sairPelaSacudida()
                         else {
@@ -102,7 +103,7 @@ class MainActivity : ComponentActivity() {
                             val em = SystemClock.elapsedRealtime()
                             janela.postDelayed({
                                 val t = io.orbe.watch.gesto.TelaTocada.ultimoTrancoMs
-                                if (kotlin.math.abs(t - em) < 500) Log.i(TAG, "sair ignorado: era batida")
+                                if (kotlin.math.abs(t - em) < 500) Diagnostico.registrar(TAG, "sair ignorado: era batida")
                                 else sairPelaSacudida()
                             }, 350)
                         }
@@ -117,7 +118,7 @@ class MainActivity : ComponentActivity() {
     private val janela = android.os.Handler(android.os.Looper.getMainLooper())
 
     private fun sairPelaSacudida() {
-        Log.i(TAG, "sair: sacudida para fora")
+        Diagnostico.registrar(TAG, "sair: sacudida para fora")
         ServicoSacudida.saiuEm = SystemClock.uptimeMillis()
         // o relógio volta ao mostrador; o onStop fecha a ponte e corta a voz
         moveTaskToBack(true)

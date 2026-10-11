@@ -1,5 +1,6 @@
 package io.orbe.watch.gesto
 
+import io.orbe.watch.dados.Diagnostico
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -203,7 +204,7 @@ class ServicoSacudida : Service(), SensorEventListener {
 
     private fun fecharJanela() {
         if (!janelaAberta) return
-        if (!sacudida.armado) Log.d(TAG, "não armou; maior pico ignorado: %.1f".format(sacudida.maxAntesDeArmar))
+        if (!sacudida.armado) Diagnostico.registrar(TAG, "não armou; maior pico ignorado: %.1f".format(sacudida.maxAntesDeArmar))
         sensores.unregisterListener(this)
         janelaAberta = false
         fimJanela = 0L
@@ -235,9 +236,9 @@ class ServicoSacudida : Service(), SensorEventListener {
                 val gesto = sacudida.ler(event.timestamp / 1_000_000, x, sqrt(x * x + y * y + z * z))
                 if (sacudida.armado && !avisouArmado) {
                     avisouArmado = true
-                    Log.d(TAG, "armado; maior pico ignorado antes: %.1f".format(sacudida.maxAntesDeArmar))
+                    Diagnostico.registrar(TAG, "armado; maior pico ignorado antes: %.1f".format(sacudida.maxAntesDeArmar))
                 }
-                sacudida.tirarResumo()?.let { Log.i(TAG, "sequência: $it") }
+                sacudida.tirarResumo()?.let { Diagnostico.registrar(TAG, "sequência: $it") }
                 // durante a calibração o gesto é medido pela tela e não abre nada; logo
                 // depois de sair do orbe pela sacudida, a volta do pulso não o reabre
                 val acabouDeSair = SystemClock.uptimeMillis() - saiuEm < SAIU_MS
@@ -255,7 +256,7 @@ class ServicoSacudida : Service(), SensorEventListener {
     private fun abrirOrbe() {
         // chamou a Hina: o orbe não abre por cima dela
         if (Vizinhos.hinaNaFrente(this)) {
-            Log.i(TAG, "a Hina está na tela: a sacudida não abre o orbe")
+            Diagnostico.registrar(TAG, "a Hina está na tela: a sacudida não abre o orbe")
             return
         }
         if (!Settings.canDrawOverlays(this)) {
@@ -268,7 +269,7 @@ class ServicoSacudida : Service(), SensorEventListener {
             @Suppress("DEPRECATION")
             energia.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "orbe:gesto-tela")
                 .acquire(TELA_MS)
-            Log.i(TAG, "abrindo o orbe com a tela apagada")
+            Diagnostico.registrar(TAG, "abrindo o orbe com a tela apagada")
         }
         startActivity(
             Intent(this, MainActivity::class.java)
