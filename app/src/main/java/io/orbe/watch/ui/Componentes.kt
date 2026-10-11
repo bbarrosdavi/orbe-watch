@@ -110,6 +110,12 @@ val LocalRolando = compositionLocalOf { false }
 /** O papel de parede borrado atrás dos menus; desligado, eles ficam no preto. */
 val LocalFundoMenu = compositionLocalOf { true }
 
+/** Uma tela opaca (o histórico, uma calibração) cobre o orbe: ele fica no último quadro e o Motor dorme. */
+val LocalCoberto = compositionLocalOf { false }
+
+/** O relógio escureceu com o app aberto: só o orbe fica, apagado; rótulos, pontos e textos saem. */
+val LocalAmbiente = compositionLocalOf { false }
+
 /** Botão de texto: chapado, ou em pílula na cor de destaque. `ligado` tinge o chapado, para os que alternam. */
 @Composable
 fun Botao(

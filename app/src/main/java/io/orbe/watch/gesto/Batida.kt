@@ -82,6 +82,47 @@ private fun parecidas(a: FloatArray, b: FloatArray): Float {
 private const val FOLGA = 3
 
 /**
+ * A forma sem a orientação do pulso: em cada instante, a intensidade da
+ * aceleração e a do giro (a raiz da soma dos três eixos), cada uma com o mesmo
+ * peso. O mesmo estalo com o relógio virado para cima, para você ou para fora
+ * cai em eixos diferentes, mas tem a mesma intensidade.
+ */
+internal fun semOrientacao(f: FloatArray): FloatArray {
+    val m = FloatArray(2 * AMOSTRAS)
+    for (t in 0 until AMOSTRAS) {
+        var a = 0f
+        var g = 0f
+        for (c in 0 until 3) { val v = f[c * AMOSTRAS + t]; a += v * v }
+        for (c in 3 until 6) { val v = f[c * AMOSTRAS + t]; g += v * v }
+        m[t] = sqrt(a); m[AMOSTRAS + t] = sqrt(g)
+    }
+    for (o in intArrayOf(0, AMOSTRAS)) {
+        var n = 0f
+        for (t in 0 until AMOSTRAS) n += m[o + t] * m[o + t]
+        val k = sqrt(n).coerceAtLeast(1e-6f) * 1.41421f
+        for (t in 0 until AMOSTRAS) m[o + t] /= k
+    }
+    return m
+}
+
+/** [parecidas] para as formas sem orientação (2 canais). */
+internal fun parecidasSemOrientacao(a: FloatArray, b: FloatArray): Float {
+    var melhor = -1f
+    for (d in -FOLGA..FOLGA) {
+        var s = 0f
+        for (c in 0 until 2) {
+            val o = c * AMOSTRAS
+            for (t in 0 until AMOSTRAS) {
+                val u = t + d
+                if (u in 0 until AMOSTRAS) s += a[o + t] * b[o + u]
+            }
+        }
+        if (s > melhor) melhor = s
+    }
+    return melhor
+}
+
+/**
  * O perfil aprendido de uma força: as próprias tentativas como exemplos (a
  * semelhança de um gesto é a do exemplo mais parecido, então cada posição do
  * braço calibrada vale por si, sem virar uma média que não parece com nenhuma),
@@ -97,8 +138,26 @@ class Perfil(
 ) {
     fun parecenca(j: Janela) = vizinhos(j.forma, exemplos)
 
+    private val exemplosSemOrientacao by lazy { exemplos.map(::semOrientacao) }
+
+    /** a semelhança sem a orientação do pulso (os dois exemplos mais parecidos, como em [parecenca]) */
+    fun parecencaSemOrientacao(j: Janela): Float {
+        val f = semOrientacao(j.forma)
+        var a = -1f
+        var b = -1f
+        for (e in exemplosSemOrientacao) {
+            val x = parecidasSemOrientacao(f, e)
+            if (x > a) { b = a; a = x } else if (x > b) b = x
+        }
+        return if (b < -0.5f) a else (a + b) / 2
+    }
+
     /** a força da janela na faixa das tentativas, com folga para os lados */
     fun naFaixa(j: Janela) = j.aceleracao in aceleracao && j.giro in giro
+
+    /** a força ([Batida.forca]) mais baixa e a mais alta da faixa das tentativas, com a folga */
+    val forcaMin: Float get() = aceleracao.start + giro.start
+    val forcaMax: Float get() = aceleracao.endInclusive + giro.endInclusive
 
     companion object {
         private const val FOLGA_FORCA = 1.4f
@@ -149,21 +208,53 @@ class Perfil(
 class ModeloBatida(val fraca: Perfil?, val forte: Perfil?, val nada: List<Janela>, val gatilho: Float) {
 
     /**
-     * A força do gesto, ou null (não é batida); o texto diz por quê. [emSequencia]:
-     * já há um toque contado e este chega no ritmo; o primeiro já provou que é
-     * gesto, e o seguinte só precisa parecer, não ser igual ([FOLGA_SEQUENCIA]).
+     * A força do gesto, ou null (não é batida); o texto diz por quê. A classe sai
+     * da força quando ela só cabe numa; em sequência ([emSequencia]) o toque
+     * fraco tem a folga [FOLGA_SEQUENCIA].
      */
     fun classificar(j: Janela, emSequencia: Boolean = false): Pair<Forca?, String> {
-        val candidatos = listOfNotNull(fraca?.let { Forca.FRACA to it }, forte?.let { Forca.FORTE to it })
-        if (candidatos.isEmpty()) return null to "sem calibração"
-        val (f, p, s) = candidatos.map { (f, p) -> Triple(f, p, p.parecenca(j)) }.maxBy { it.third }
-        val ruido = (nada.maxOfOrNull { parecidas(it.forma, j.forma) } ?: -1f) + MARGEM_NADA
-        val limiar = if (emSequencia) (p.limiar - FOLGA_SEQUENCIA).coerceAtLeast(0.4f) else p.limiar
+        if (fraca == null && forte == null) return null to "sem calibração"
+        val forca = Batida.forca(j)
+        // a força decide a classe quando só cabe numa: um estalo de 30 m/s² nunca é toque
+        // fraco, e um toque nunca é estalo. Antes a classe era a de forma mais parecida, e
+        // estalos de força 20 e 30 eram julgados (e recusados) como toque fraco
+        val pelaForca = when {
+            // na faixa do estalo e acima de qualquer toque, ou o dobro do toque mais forte (o estalo
+            // mais fraco que os da calibração, já que você estala em intensidades diferentes)
+            forte != null && (fraca == null || forca > fraca.forcaMax) &&
+                (forca >= forte.forcaMin || (fraca != null && forca >= fraca.forcaMax * FORTE_SOBRE_FRACA)) -> Forca.FORTE
+            fraca != null && fraca.naFaixa(j) && (forte == null || forca < forte.forcaMin) -> Forca.FRACA
+            else -> null
+        }
+        val candidatos = listOfNotNull(
+            fraca?.takeIf { pelaForca != Forca.FORTE }?.let { Forca.FRACA to it },
+            forte?.takeIf { pelaForca != Forca.FRACA }?.let { Forca.FORTE to it },
+        )
+        // o estalo se compara sem a orientação do pulso; o toque fraco segue eixo a eixo (calibrado assim)
+        val (f, p, s) = candidatos.map { (f, p) ->
+            Triple(f, p, if (f == Forca.FORTE) p.parecencaSemOrientacao(j) else p.parecenca(j))
+        }.maxBy { it.third }
+        val ruido = (if (f == Forca.FORTE) {
+            val fj = semOrientacao(j.forma)
+            nada.maxOfOrNull { parecidasSemOrientacao(semOrientacao(it.forma), fj) }
+        } else {
+            nada.maxOfOrNull { parecidas(it.forma, j.forma) }
+        } ?: -1f) + MARGEM_NADA
+        val limiar = when {
+            // o estalo que a força já separou: a forma só confirma (estalos de várias
+            // intensidades saem de 0,37 a 0,68 contra os da calibração, e o limiar dela ia ao teto 0,70)
+            f == Forca.FORTE && pelaForca == Forca.FORTE -> minOf(p.limiar, LIMIAR_FORTE_PELA_FORCA)
+            // o toque fraco volta ao limiar calibrado e à folga do segundo toque em diante (o piso
+            // de 0,55 recusava os toques de verdade, que davam 0,50 a 0,54 no relógio)
+            f == Forca.FRACA && emSequencia -> (p.limiar - FOLGA_SEQUENCIA).coerceAtLeast(0.4f)
+            else -> p.limiar
+        }
         return when {
             s < limiar -> null to "forma %.2f abaixo de %.2f (%s)".format(s, limiar, f)
-            !p.naFaixa(j) -> null to "força fora da faixa do %s".format(f)
+            // o estalo separado pela força não tem teto: mais forte que os da calibração ainda é estalo
+            !(f == Forca.FORTE && pelaForca == Forca.FORTE) && !p.naFaixa(j) -> null to "força fora da faixa do %s".format(f)
             ruido >= s -> null to "mais parecido com o que não é batida (%.2f contra %.2f)".format(ruido, s)
-            else -> f to "forma %.2f: %s%s".format(s, f, if (emSequencia) " (em sequência)" else "")
+            else -> f to "forma %.2f: %s%s%s".format(s, f, if (pelaForca != null) " (pela força)" else "", if (emSequencia) " (em sequência)" else "")
         }
     }
 
@@ -171,7 +262,12 @@ class ModeloBatida(val fraca: Perfil?, val forte: Perfil?, val nada: List<Janela
 
     companion object {
         const val GATILHO_PADRAO = 0.6f
+        /** o limiar de forma do estalo quando a força já o separou de tudo o mais */
+        const val LIMIAR_FORTE_PELA_FORCA = 0.40f
+        /** quanto o toque seguinte de uma sequência pode ser menos parecido que o primeiro */
         const val FOLGA_SEQUENCIA = 0.1f
+        /** quantas vezes o teto de força do toque fraco já é estalo, mesmo abaixo da faixa calibrada dele */
+        const val FORTE_SOBRE_FRACA = 2f
         /** o que não é batida ganha empate com folga: parecido quase igual com os dois, recusa */
         const val MARGEM_NADA = 0.05f
 
@@ -364,12 +460,13 @@ class Batida(
     }
 
     /** As janelas desde a última vez: na coleta, todas; no uso, as que contaram. */
-    fun tirarJanelas(): List<Janela> = janelas.toList().also { janelas.clear() }
+    fun tirarJanelas(): List<Janela> = if (janelas.isEmpty()) emptyList() else janelas.toList().also { janelas.clear() }
 
-    fun tirarComandos(): List<Comando> = comandos.toList().also { comandos.clear() }
+    fun tirarComandos(): List<Comando> = if (comandos.isEmpty()) emptyList() else comandos.toList().also { comandos.clear() }
 
     /** O que se decidiu de cada candidato, para o log. */
-    fun tirarRegistros(): List<String> = registros.toList().also { registros.clear() }
+    // vazias (quase sempre: são lidas a cada amostra, 100 por segundo), sem criar lista nova
+    fun tirarRegistros(): List<String> = if (registros.isEmpty()) emptyList() else registros.toList().also { registros.clear() }
 
     companion object {
         private const val ANEL = 64
@@ -382,7 +479,8 @@ class Batida(
         const val MAX_VEZES = 4
         const val JUNTAR_MS = 500L               // os toques rápidos do Davi: 300 a 450 ms (pico a pico)
         /** as escolhas do intervalo nos ajustes */
-        val INTERVALOS = listOf(300L, 400L, 500L, 600L, 800L, 1000L)
+        // 0: cada toque é um comando, na hora (sem combinações de toques nem toque com estalo)
+        val INTERVALOS = listOf(0L, 300L, 400L, 500L, 600L, 800L, 1000L)
 
         /** um número só para comparar a força de duas janelas */
         fun forca(j: Janela) = j.aceleracao + j.giro

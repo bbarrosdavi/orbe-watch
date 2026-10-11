@@ -34,6 +34,7 @@ internal class Primitivas {
         fun desenho(tipo: Int, indice: Int, vertices: Int, vezes: Int) {
             p.v4("prim", tipo.toFloat(), indice.toFloat(), aa, SEGMENTOS.toFloat())
             GLES30.glDrawArraysInstanced(GLES30.GL_TRIANGLE_STRIP, 0, vertices, vezes)
+            Diagnostico.gl()
         }
         val lacos = fx["lacos"]
         val raios = fx["raios"]

@@ -35,6 +35,9 @@ enum class AcaoToque(val id: String, val nome: String) {
     RACIOCINIO("raciocinio", "Trocar raciocínio"),
     NADA("nada", "Nada");
 
+    /** precisa da ponte com o PC (as de sessão); trocar de orbe não */
+    val precisaPonte: Boolean get() = this != PROXIMO && this != ANTERIOR && this != NADA && this != FALAR
+
     companion object {
         fun de(id: String?): AcaoToque? = entries.firstOrNull { it.id == id }
         /** um, dois e três toques como sempre foram; quatro, nada */
@@ -125,6 +128,24 @@ data class Ajustes(
     val batidasAcoes: List<AcaoToque> = AcaoToque.PADRAO_BATIDAS,
     /** o intervalo máximo entre os toques de uma sequência (ms): também a espera até o comando sair */
     val batidasIntervalo: Long = io.orbe.watch.gesto.Batida.JUNTAR_MS,
+    // ── desempenho (aba Desempenho): os padrões são o comportamento de antes ──
+    /** com o app na frente a tela não apaga; em sessão ela nunca apaga, com ou sem esta chave */
+    val telaAcesa: Boolean = true,
+    /** sem [telaAcesa], fora de sessão: segundos de tela acesa depois do último toque; 0 = o tempo do sistema */
+    val telaTempo: Int = 0,
+    /** a tela que escurece com o app aberto deixa o orbe parado e apagado (ambiente), em vez de voltar ao mostrador */
+    val ambiente: Boolean = true,
+    /** quadros por segundo do orbe parado (sem sessão e sem dedo) e do orbe em sessão */
+    val quadrosParado: Int = 20,
+    val quadrosAtivo: Int = 30,
+    /** os sensores dos gestos entregam em lote: menos despertares, um pouco mais de atraso no gesto */
+    val sensoresLote: Boolean = false,
+    /** sem sessão por [PONTE_PARADA_MS], a ponte e o Wi-Fi saem; tocar o orbe reconecta */
+    val ponteParada: Boolean = false,
+    /** a espera pela resposta com o orbe fora da tela não segura a CPU acordada */
+    val esperaLeve: Boolean = false,
+    /** por onde a ponte sai: [REDES] */
+    val rede: String = "auto",
 ) {
     /** A ação de [n] toques curtos (1 a 4). */
     fun toque(n: Int): AcaoToque = toques.getOrNull(n - 1) ?: AcaoToque.NADA
@@ -189,6 +210,19 @@ data class Ajustes(
         private fun lista(l: List<String>, antes: List<AcaoToque>, validas: List<AcaoToque>) =
             List(AcaoToque.PADRAO.size) { i -> AcaoToque.de(l.getOrNull(i))?.takeIf { it in validas } ?: antes.getOrNull(i) ?: AcaoToque.NADA }
 
+        /** as opções de [telaTempo], em segundos (0 = o tempo do sistema) */
+        val TEMPOS_TELA = listOf(0, 30, 60, 120, 300)
+        val QUADROS_PARADO = listOf(10, 15, 20, 30)
+        val QUADROS_ATIVO = listOf(20, 30)
+        /**
+         * "auto": a LAN pelo Wi-Fi do relógio, o resto (a tailnet, um endereço público)
+         * pela rede que o sistema escolher, que com o celular por perto é o Bluetooth
+         * dele; "wifi": sempre pelo Wi-Fi; "celular": nunca prende o Wi-Fi
+         */
+        val REDES = listOf("auto", "wifi", "celular")
+        /** quanto o orbe fica parado, sem sessão, até a ponte sair ([ponteParada]) */
+        const val PONTE_PARADA_MS = 120_000L
+
         const val TAMANHO_MIN = 0.6f
         const val TAMANHO_MAX = 1.3f
         /** "pt": traduzidas para o português; "original": como o agente escreve */
@@ -240,6 +274,15 @@ class Cofre(private val ctx: Context) {
         val batidaNada = stringPreferencesKey("batida_nada")
         val batidasAcoes = stringPreferencesKey("batidas_acoes")
         val batidasIntervalo = longPreferencesKey("batidas_intervalo")
+        val telaAcesa = booleanPreferencesKey("tela_acesa")
+        val telaTempo = intPreferencesKey("tela_tempo")
+        val ambiente = booleanPreferencesKey("ambiente")
+        val quadrosParado = intPreferencesKey("quadros_parado")
+        val quadrosAtivo = intPreferencesKey("quadros_ativo")
+        val sensoresLote = booleanPreferencesKey("sensores_lote")
+        val ponteParada = booleanPreferencesKey("ponte_parada")
+        val esperaLeve = booleanPreferencesKey("espera_leve")
+        val rede = stringPreferencesKey("rede")
     }
 
     private fun lerAgentes(s: String?): Map<String, String> =
@@ -317,6 +360,15 @@ class Cofre(private val ctx: Context) {
             batidaNada = p[K.batidaNada] ?: d.batidaNada,
             batidasAcoes = p[K.batidasAcoes]?.split(',')?.mapNotNull { AcaoToque.de(it) }?.takeIf { it.size == 8 } ?: d.batidasAcoes,
             batidasIntervalo = p[K.batidasIntervalo] ?: d.batidasIntervalo,
+            telaAcesa = p[K.telaAcesa] ?: d.telaAcesa,
+            telaTempo = p[K.telaTempo]?.takeIf { it in Ajustes.TEMPOS_TELA } ?: d.telaTempo,
+            ambiente = p[K.ambiente] ?: d.ambiente,
+            quadrosParado = p[K.quadrosParado]?.takeIf { it in Ajustes.QUADROS_PARADO } ?: d.quadrosParado,
+            quadrosAtivo = p[K.quadrosAtivo]?.takeIf { it in Ajustes.QUADROS_ATIVO } ?: d.quadrosAtivo,
+            sensoresLote = p[K.sensoresLote] ?: d.sensoresLote,
+            ponteParada = p[K.ponteParada] ?: d.ponteParada,
+            esperaLeve = p[K.esperaLeve] ?: d.esperaLeve,
+            rede = p[K.rede]?.takeIf { it in Ajustes.REDES } ?: d.rede,
         )
     }
 
@@ -362,6 +414,15 @@ class Cofre(private val ctx: Context) {
             p[K.ordem] = a.ordem.joinToString(",")
             p[K.sair] = a.sair
             p[K.sairFora] = a.sairFora
+            p[K.telaAcesa] = a.telaAcesa
+            p[K.telaTempo] = a.telaTempo
+            p[K.ambiente] = a.ambiente
+            p[K.quadrosParado] = a.quadrosParado
+            p[K.quadrosAtivo] = a.quadrosAtivo
+            p[K.sensoresLote] = a.sensoresLote
+            p[K.ponteParada] = a.ponteParada
+            p[K.esperaLeve] = a.esperaLeve
+            p[K.rede] = a.rede
         }
     }
 }

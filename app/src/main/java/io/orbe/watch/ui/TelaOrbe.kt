@@ -34,7 +34,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -83,6 +82,7 @@ import io.orbe.watch.orbe.Skin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -95,6 +95,10 @@ import kotlin.math.sqrt
 import androidx.compose.foundation.pager.PagerState as EstadoFileira
 import androidx.compose.foundation.pager.rememberPagerState as lembrarFileira
 import androidx.compose.foundation.pager.VerticalPager as PaginasDaFileira
+
+/** O passo do respiro do ponto da sessão travada (15 por segundo) e o lado do quadrado dele, em dp. */
+private const val PULSO_MS = 66L
+private const val LADO_PULSO = 14.0
 
 /** Mais que isto parado, o dedo está segurando para falar (o segurar_s do daemon). */
 private const val SEGURAR_MS = 350L
@@ -284,11 +288,12 @@ fun TelaOrbe(
             }
         }
         // por cima da tela, sem tirar largura dos orbes (o scaffold do Wear reservava uma faixa e os tirava do centro)
-        PontosDaLista(nSkins, { paginas.currentPage + paginas.currentPageOffsetFraction }, Modifier.align(Alignment.CenterEnd).padding(end = 2.dp))
+        val ambiente = LocalAmbiente.current
+        if (!ambiente) PontosDaLista(nSkins, { paginas.currentPage + paginas.currentPageOffsetFraction }, Modifier.align(Alignment.CenterEnd).padding(end = 2.dp))
 
         // ── o orbe que quer falar e espera a vez: em miniatura, parado, na diagonal de baixo à direita ──
         val esperas by vm.esperas.collectAsStateWithLifecycle()
-        esperas.firstOrNull()?.let { e ->
+        if (!ambiente) esperas.firstOrNull()?.let { e ->
             val skinE = Skin.entries.firstOrNull { it.id == e.skin } ?: return@let
             val corE = runCatching { Color(android.graphics.Color.parseColor(e.cor)) }.getOrNull() ?: aparencia.tema.accent
             val chave = ChavePrevia(
@@ -306,7 +311,7 @@ fun TelaOrbe(
         val alfaTexto by animateFloatAsState(
             if (comTexto) 1f else 0f, tween(220, delayMillis = if (comTexto) 160 else 0), label = "texto",
         )
-        if (alfaTexto > 0.01f) {
+        if (alfaTexto > 0.01f && !ambiente) {
             val cel = Celula.para(w.toDouble(), h.toDouble(), ajustes.tamanhoDe(aparencia.skin).toDouble(), true)
             val skin = aparencia.skin
             val y0 = (cel.cy + cel.lado * skin.pe * (if (redonda) skin.encolheNoDisco(cel.lado) else 1.0)).toFloat() + 3f
@@ -340,29 +345,44 @@ fun TelaOrbe(
         }
 
         // ── sessão travada: ponto logo acima da figura, com respiro lento ──
-        if (visto.travado && visto.visivel) {
-            val t = remember { mutableLongStateOf(0L) }
-            LaunchedEffect(Unit) { while (true) withFrameNanos { t.longValue = it } }
+        if (visto.travado && visto.visivel && !ambiente) {
+            // o respiro tem período de 3 s: 15 passos por segundo não mostram degrau, e
+            // a janela redesenha 15 vezes por segundo em vez de em todo vsync
+            val t = remember { mutableLongStateOf(System.nanoTime()) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    t.longValue = System.nanoTime()
+                    delay(PULSO_MS)
+                }
+            }
             val cel = Celula.para(w.toDouble(), h.toDouble(), ajustes.tamanhoDe(aparencia.skin).toDouble(), comTexto)
             val skin = aparencia.skin
             val topo = cel.lado * skin.topo * (if (redonda) skin.encolheNoDisco(cel.lado) else 1.0)
             val cor = if (skin.avatar) Estilo.accent else Estilo.anel
-            Canvas(Modifier.fillMaxSize()) {
+            val cy = max(7.0, cel.cy - topo - 8)
+            // só o quadrado do ponto, numa camada própria: o passo do respiro não regrava o resto da tela
+            Canvas(
+                Modifier
+                    .offset((cel.cx - LADO_PULSO / 2).dp, (cy - LADO_PULSO / 2).dp)
+                    .size(LADO_PULSO.dp)
+                    .graphicsLayer(),
+            ) {
                 val pulso = 0.62f + 0.38f * (0.5f + 0.5f * sin(t.longValue / 1e9 * 2.0).toFloat())
-                val c = Offset(cel.cx.toFloat() * density, max(7.0, cel.cy - topo - 8).toFloat() * density)
-                drawCircle(cor.copy(alpha = 0.22f * pulso), 6 * density, c)
-                drawCircle(cor.copy(alpha = 0.90f * pulso), 3 * density, c)
+                drawCircle(cor.copy(alpha = 0.22f * pulso), 6 * density, center)
+                drawCircle(cor.copy(alpha = 0.90f * pulso), 3 * density, center)
             }
         }
 
         // ── rodapé: o estado da ponte ──
+        val dormindo by vm.ponteDormindo.collectAsStateWithLifecycle()
         val estado = when {
+            dormindo -> "ponte dormindo · toque acorda"
             ligacao is Ligacao.SemServidor -> if (ajustes.servidor.isBlank() || ajustes.token.isBlank()) "sem servidor" else ""
             ligacao is Ligacao.Conectando -> "conectando…"
             ligacao is Ligacao.Falha -> (ligacao as Ligacao.Falha).motivo
             else -> ""
         }
-        Sumir(estado.isNotEmpty() && !comTexto, Modifier.align(Alignment.BottomCenter).padding(bottom = 22.dp)) {
+        Sumir(estado.isNotEmpty() && !comTexto && !ambiente, Modifier.align(Alignment.BottomCenter).padding(bottom = 22.dp)) {
             Texto(
                 estado, Estilo.mono,
                 Modifier.clickable(remember { MutableInteractionSource() }, indication = null, onClick = abrirAjustes),
@@ -476,7 +496,11 @@ private fun Fileira(
 @Composable
 private fun Orbe(vm: OrbeViewModel, aparencia: Aparencia, atual: Boolean, tamanho: Float, redonda: Boolean, pode: () -> Boolean) {
     val rolando = LocalRolando.current
+    val coberto = LocalCoberto.current
     val densidade = LocalDensity.current.density
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    // a página que entra já decodifica o atlas dela fora da orbe-gl
+    LaunchedEffect(aparencia.skin) { io.orbe.watch.gl.Motor.prepararArte(ctx, aparencia.skin) }
     val vizinha = remember { OrbeCena(entrar = false) }
     SideEffect {
         vizinha.skin = aparencia.skin
@@ -489,13 +513,13 @@ private fun Orbe(vm: OrbeViewModel, aparencia: Aparencia, atual: Boolean, tamanh
         vizinha.accent = aparencia.corAnel()
     }
     AndroidView(
-        factory = { OrbeView(it, if (atual) vm.cena else vizinha).apply { adaptar = true; parado = !atual || rolando } },
+        factory = { OrbeView(it, if (atual) vm.cena else vizinha).apply { adaptar = true; parado = !atual || rolando || coberto } },
         update = {
             it.cena = if (atual) vm.cena else vizinha
             // a que entra é desenhada uma vez e congela: eram dois orbes
             // grandes por quadro no meio da rolagem. Arrastando para o menu,
             // o orbe também congela: a GPU fica para a tela que anda
-            it.parado = !atual || rolando
+            it.parado = !atual || rolando || coberto       // embaixo do histórico, ninguém o vê
         },
         modifier = Modifier.fillMaxSize().pointerInput(Unit) { tocar(vm, densidade, pode) },
     )
@@ -645,6 +669,7 @@ internal fun RotuloSessao(
  */
 @Composable
 private fun Rotulo(alto: String, pe: String, cor: Color, modifier: Modifier = Modifier, miniaturas: List<Pair<ChavePrevia, Boolean>> = emptyList()) {
+    if (LocalAmbiente.current) return
     val corTitulo = lerp(cor, Estilo.texto, 0.7f).alfa(0.55f)
     val corPe = Estilo.texto.alfa(0.45f)
     Box(modifier.padding(BORDA_ROTULO)) {

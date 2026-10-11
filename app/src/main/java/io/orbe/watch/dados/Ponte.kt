@@ -129,7 +129,7 @@ class Ponte(
                     text.startsWith("ola ") -> Protocolo.ola(text.substring(4))?.let {
                         conectou = true
                         soquete = webSocket
-                        Diagnostico.ligar { webSocket.send(it) }
+                        RegistroGestos.ligar { webSocket.send(it) }
                         _estado.value = Ligacao.Conectada(it.microfone, it.voz, it.vozPc)
                         aoOla(it, text.substring(4))
                     }
@@ -178,7 +178,7 @@ class Ponte(
         try {
             return fim.await()
         } finally {
-            if (conectou) Diagnostico.ligar(null)
+            if (conectou) RegistroGestos.ligar(null)
             ws.cancel()
         }
     }

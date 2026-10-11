@@ -8,7 +8,7 @@ import org.json.JSONObject
  * logcat e, pela ponte, para o arquivo de gestos do PC. Sem ponte, espera
  * numa fila curta e sai quando ela conectar.
  */
-object Diagnostico {
+object RegistroGestos {
     private const val MAX = 500
     private val fila = ArrayDeque<String>()
     private var envio: ((String) -> Boolean)? = null

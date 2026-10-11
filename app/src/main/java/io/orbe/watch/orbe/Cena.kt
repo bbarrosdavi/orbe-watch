@@ -66,6 +66,11 @@ class OrbeCena(entrar: Boolean = true) : Cena {
     @Volatile var olharY = Double.NaN
     /** o orbe em tela não é o que abriu a sessão: ela segue, mas ele fica parado */
     @Volatile var alheia = false
+    /** o relógio escureceu com o app aberto: a figura para no quadro em que estava, apagada */
+    @Volatile var ambiente = false
+    /** o deslocamento do ambiente (px lógicos), que muda a cada minuto para não marcar a tela */
+    @Volatile var deslocX = 0.0
+    @Volatile var deslocY = 0.0
 
     /** Chamado quando muda o que a tela mostra em volta do orbe (de qualquer thread). */
     @Volatile var aoMudar: ((Retrato) -> Unit)? = null
@@ -103,7 +108,7 @@ class OrbeCena(entrar: Boolean = true) : Cena {
     val retratoAtual: Retrato get() = synchronized(this) { retrato }
 
     @Volatile private var dormindo = true
-    override val calma: Boolean get() = dormindo && !toque
+    override val calma: Boolean get() = ambiente || (dormindo && !toque)
 
     // ── comandos (mesma semântica do OrbWin) ──
 
@@ -187,8 +192,10 @@ class OrbeCena(entrar: Boolean = true) : Cena {
     private fun fator(a: Double, k: Double) = 1 - (1 - a).pow(k)
 
     override fun passo(dt: Double, w: Double, h: Double): Arte {
-        // o teto de 50 ms do desktop; à espera, o Motor cai para 20 quadros por segundo
-        val d = dt.coerceIn(0.0, if (dormindo) 0.08 else 0.05)
+        // o teto de 50 ms do desktop; à espera, o Motor cai para 20 quadros por segundo.
+        // No ambiente o tempo não anda: o quadro sai igual, só apagado
+        val amb = ambiente
+        val d = if (amb) 0.0 else dt.coerceIn(0.0, if (dormindo) 0.08 else 0.05)
         val k = d / 0.033
         val e: Int
         val nv: Double
@@ -233,7 +240,7 @@ class OrbeCena(entrar: Boolean = true) : Cena {
             desp = p
         }
         val envEsc = sc * (1 - 0.08 * sono) * (1 + toqueCresce * toqueS)
-        val envAlfa = a * (1 - 0.38 * sono)
+        val envAlfa = a * (1 - 0.38 * sono) * (if (amb) ALFA_AMBIENTE else 1.0)
 
         // a célula anda sem salto quando o texto entra ou sai
         val alvo = Celula.para(w, h, tamanho, comTexto)
@@ -282,8 +289,13 @@ class OrbeCena(entrar: Boolean = true) : Cena {
             arte = anel
         }
         arte.avancar(d)
-        arte.montar(w, h, c[0], c[1], c[2], c[2])
+        arte.montar(w, h, c[0] + (if (amb) deslocX else 0.0), c[1] + (if (amb) deslocY else 0.0), c[2], c[2])
         return arte
+    }
+
+    private companion object {
+        /** o brilho da figura no ambiente: o OLED quase apagado, o orbe ainda reconhecível */
+        const val ALFA_AMBIENTE = 0.5
     }
 }
 

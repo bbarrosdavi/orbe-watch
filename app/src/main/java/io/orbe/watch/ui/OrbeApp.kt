@@ -1,10 +1,7 @@
 package io.orbe.watch.ui
 
-import io.orbe.watch.dados.Diagnostico
+import io.orbe.watch.dados.RegistroGestos
 import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -13,11 +10,13 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import io.orbe.watch.gesto.Batida
 import io.orbe.watch.gesto.Forca
 import io.orbe.watch.gesto.Comando
 import io.orbe.watch.gesto.Janela
 import io.orbe.watch.gesto.ModeloBatida
+import io.orbe.watch.gesto.SensoresNaFrente
 import androidx.wear.compose.foundation.BasicSwipeToDismissBox
 import androidx.wear.compose.foundation.LocalSwipeToDismissBackgroundScrimColor
 import androidx.wear.compose.foundation.LocalSwipeToDismissContentScrimColor
@@ -97,27 +96,42 @@ fun OrbeApp(
     // a calibração da sacudida cobre o menu até salvar ou voltar
     var calibrando by remember { mutableStateOf<Calibracao?>(null) }
 
+    // o relógio escureceu com o app aberto: só o orbe, apagado, no preto
+    val ambiente by vm.emAmbiente.collectAsStateWithLifecycle()
+
+    // as prévias do menu esperam o orbe aquecer a cada abertura (3 s), ou o menu chegar perto:
+    // antes, as 128 da gaveta saíam junto da primeira compilação do orbe
+    var aquecido by remember { mutableStateOf(false) }
+    val donoCiclo = LocalLifecycleOwner.current
+    LaunchedEffect(donoCiclo) {
+        donoCiclo.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            aquecido = false
+            kotlinx.coroutines.delay(AQUECER_PREVIAS_MS)
+            aquecido = true
+        }
+    }
+
     // as batidas, com o app aberto e fora das calibrações: 1 a 4 toques fracos,
     // ou toques que terminam em estalo, cada sequência com a sua ação
     val modelo = remember(ajustes.batidaFracas, ajustes.batidaFortes, ajustes.batidaNada) {
         ModeloBatida.de(Janela.lista(ajustes.batidaFracas), Janela.lista(ajustes.batidaFortes), Janela.lista(ajustes.batidaNada))
     }
     BatidasNoPulso(
-        ligado = ajustes.batidas && calibrando == null && modelo.calibrado,
+        // no ambiente a CPU dorme entre os quadros e as batidas não chegariam inteiras
+        ligado = ajustes.batidas && calibrando == null && modelo.calibrado && !ambiente,
         modelo = modelo,
         intervalo = ajustes.batidasIntervalo,
-        aoDetectar = vm::avisarBatida,
+        lote = ajustes.sensoresLote,
     ) { c ->
-        vm.batida(c.indice, podeGravar())
+        // vibra na execução (vm.batida), não na detecção: comando que não acontece não vibra
+        vm.batida(c.indice, podeGravar(), forte = c.forca == Forca.FORTE)
     }
     // as ações de trocar de orbe (dos toques e das batidas) andam a lista como a coroa
     LaunchedEffect(vm) {
         vm.passosLista.collect { passo -> if (paginas.currentPage == 0 && historico == null) passosOrbe.tryEmit(passo) }
     }
 
-    // com a sessão aberta a tela não apaga no meio da conversa
-    val view = LocalView.current
-    SideEffect { view.keepScreenOn = retrato.visivel }
+    // a tela (acesa com a chave, sempre em sessão, ou pelo tempo dos ajustes) é da MainActivity
 
     // a ponte aceita a fala do relógio: é a hora de pedir o microfone, uma vez só
     val aceitaFala = (ligacao as? Ligacao.Conectada)?.microfone == true
@@ -132,10 +146,14 @@ fun OrbeApp(
         LocalTema provides aparencia.tema,
         LocalRolando provides (paginas.isScrollInProgress || lista.isScrollInProgress),
         LocalFundoMenu provides ajustes.fundoMenu,
+        LocalAmbiente provides ambiente,
+        // o histórico e as calibrações têm fundo próprio e cobrem o orbe inteiro
+        LocalCoberto provides (historico != null || calibrando != null),
+        LocalPreviasLiberadas provides (aquecido || paginas.currentPage == 1 || paginas.targetPage == 1),
     ) {
       Box(Modifier.fillMaxSize().background(Color.Black)) {
-        // sem o fundo atrás do orbe, ele acende junto com a entrada do menu
-        FundoVidro(
+        // sem o fundo atrás do orbe, ele acende junto com a entrada do menu; no ambiente, só o preto
+        if (!ambiente) FundoVidro(
             Modifier.graphicsLayer {
                 val menu = (paginas.currentPage + paginas.currentPageOffsetFraction).coerceIn(0f, 1f)
                 // o papel no orbe (fundo) e no menu (fundoMenu), cada um com a sua chave
@@ -144,7 +162,7 @@ fun OrbeApp(
             menu = false,
         )
         // com o fundo atrás do orbe, um véu o escurece na página dele e some na entrada do menu
-        if (aparencia.fundo) {
+        if (aparencia.fundo && !ambiente) {
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
                     alpha = Aparencia.ESCURO * (1 - (paginas.currentPage + paginas.currentPageOffsetFraction)).coerceIn(0f, 1f)
@@ -253,6 +271,10 @@ fun OrbeApp(
                 }
             }
         }
+        // o ambiente com o menu, o histórico ou uma calibração na tela: só o preto (o OLED apagado)
+        if (ambiente && (paginas.currentPage != 0 || historico != null || calibrando != null)) {
+            Box(Modifier.fillMaxSize().background(Color.Black))
+        }
       }
     }
     BackHandler(calibrando != null) { calibrando = null }
@@ -290,70 +312,67 @@ fun OrbeApp(
     }
 }
 
+/** Quanto as prévias do menu esperam depois de o app abrir, se o menu não chegar perto antes. */
+private const val AQUECER_PREVIAS_MS = 3_000L
+
 /**
- * O detector de batidas ([Batida]) ligado ao acelerômetro e ao giroscópio no
- * mais rápido enquanto o app está aberto e [ligado]; cada comando vai a [aoComando].
+ * O detector de batidas ([Batida]) no acelerômetro e no giroscópio, no mais
+ * rápido, enquanto o app está aberto e [ligado]; cada comando vai a [aoComando].
+ * As amostras vêm do [SensoresNaFrente], a inscrição que o sair também usa.
  */
 @Composable
 private fun BatidasNoPulso(
-    ligado: Boolean, modelo: ModeloBatida, intervalo: Long,
-    aoDetectar: (forte: Boolean) -> Unit, aoComando: (Comando) -> Unit,
+    ligado: Boolean, modelo: ModeloBatida, intervalo: Long, lote: Boolean,
+    aoComando: (Comando) -> Unit,
 ) {
     val ctx = LocalContext.current
     val acao = remember { arrayOf(aoComando) }
     acao[0] = aoComando
-    val aviso = remember { arrayOf(aoDetectar) }
-    aviso[0] = aoDetectar
     val dono = LocalLifecycleOwner.current
-    DisposableEffect(ligado, modelo, intervalo, dono) {
+    DisposableEffect(ligado, modelo, intervalo, lote, dono) {
         if (!ligado) return@DisposableEffect onDispose { }
         val batida = Batida(modelo, juntarMs = intervalo)
         val principal = Handler(Looper.getMainLooper())
-        // os sensores numa linha própria: na principal, cada engasgo do Compose
-        // segurava as leituras na fila e atrasava o reconhecimento
-        val linha = android.os.HandlerThread("batidas").apply { start() }
-        val naLinha = Handler(linha.looper)
-        val sensores = ctx.getSystemService(SensorManager::class.java)
-        val ouvinte = object : SensorEventListener {
-            override fun onSensorChanged(event: SensorEvent) {
-                val (x, y, z) = event.values
-                when (event.sensor.type) {
-                    Sensor.TYPE_ACCELEROMETER -> {
-                        batida.acel(event.timestamp / 1_000_000, x, y, z)
-                        for (r in batida.tirarRegistros()) Diagnostico.registrar("OrbeBatida", r)
-                        batida.tirarJanelas()
-                        // o aviso vibra uma vez, no comando, e já aqui na linha dos sensores:
-                        // a cada toque ele caía em cima do toque seguinte (o detector fica
-                        // surdo enquanto o motor vibra) e a sequência rápida se perdia
-                        for (c in batida.tirarComandos()) {
-                            Diagnostico.registrar("OrbeBatida", "comando ${c.forca} x${c.vezes}")
-                            aviso[0](c.forca == Forca.FORTE)
-                            principal.post { acao[0](c) }
-                        }
+        // as amostras chegam na thread dos sensores: na principal, cada engasgo do
+        // Compose segurava as leituras na fila e atrasava o reconhecimento
+        val leitor = SensoresNaFrente.Leitor { tipo, tNs, x, y, z ->
+            when (tipo) {
+                Sensor.TYPE_ACCELEROMETER -> {
+                    batida.acel(tNs / 1_000_000, x, y, z)
+                    for (r in batida.tirarRegistros()) RegistroGestos.registrar("OrbeBatida", r)
+                    batida.tirarJanelas()
+                    // um aviso por comando (não por toque: ele caía em cima do toque seguinte),
+                    // dado pelo vm.batida só se o comando acontece
+                    for (c in batida.tirarComandos()) {
+                        RegistroGestos.registrar("OrbeBatida", "comando ${c.forca} x${c.vezes}")
+                        principal.post { acao[0](c) }
                     }
-                    Sensor.TYPE_GYROSCOPE -> batida.giro(x, y, z)
                 }
+                Sensor.TYPE_GYROSCOPE -> batida.giro(x, y, z)
             }
-
-            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
         }
-        // só com o app na frente: pausado, os sensores saem
+        var inscricao: SensoresNaFrente.Inscricao? = null
+        // só com o app na frente: pausado, a inscrição sai
         val ciclo = LifecycleEventObserver { _, e ->
             when (e) {
-                Lifecycle.Event.ON_RESUME -> {
-                    naLinha.post { batida.zerar() }
-                    sensores?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { sensores.registerListener(ouvinte, it, SensorManager.SENSOR_DELAY_FASTEST, naLinha) }
-                    sensores?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let { sensores.registerListener(ouvinte, it, SensorManager.SENSOR_DELAY_FASTEST, naLinha) }
+                Lifecycle.Event.ON_RESUME -> if (inscricao == null) {
+                    SensoresNaFrente.naLinha { batida.zerar() }
+                    inscricao = SensoresNaFrente.inscrever(
+                        ctx, leitor, SensoresNaFrente.MAIS_RAPIDO_US, SensoresNaFrente.MAIS_RAPIDO_US,
+                        if (lote) SensoresNaFrente.LOTE_US else 0,
+                    )
                 }
-                Lifecycle.Event.ON_PAUSE -> sensores?.unregisterListener(ouvinte)
+                Lifecycle.Event.ON_PAUSE -> {
+                    inscricao?.let(SensoresNaFrente::sair)
+                    inscricao = null
+                }
                 else -> Unit
             }
         }
         dono.lifecycle.addObserver(ciclo)
         onDispose {
             dono.lifecycle.removeObserver(ciclo)
-            sensores?.unregisterListener(ouvinte)
-            linha.quitSafely()
+            inscricao?.let(SensoresNaFrente::sair)
         }
     }
 }

@@ -48,8 +48,6 @@ class Anel : Arte {
     // os nomes dos uniforms por índice, montados uma vez: o quadro não aloca string
     private val nomesCampo = Array(9) { "campo$it" }
     private val nomesLingua = Array(nLingua) { "lingua$it" }
-    private val nomesCirculo = Array(nLingua) { "linguaC[$it]" }
-    private val nomesVertices = Array(nLingua * 8) { "linguaV[$it]" }
     // os 4 pontos e os 16 vértices da chama de uma língua, para o círculo dela
     private val ptX = DoubleArray(4)
     private val ptY = DoubleArray(4)
@@ -350,9 +348,10 @@ class Anel : Arte {
             r2 = max(r2, dx * dx + dy * dy)
         }
         val r = kotlin.math.sqrt(r2) + 2.5 * esc + FOLGA_LINGUA
-        fx.v4(nomesCirculo[j], cx, cy, r * r, 0.0)
+        v4em(fx.vetor("linguaC", nLingua), j, cx, cy, r * r, 0.0)
+        val vv = fx.vetor("linguaV", nLingua * 8)
         for (m in 0 until 8) {
-            fx.v4(nomesVertices[j * 8 + m], vertX[2 * m], vertY[2 * m], vertX[2 * m + 1], vertY[2 * m + 1])
+            v4em(vv, j * 8 + m, vertX[2 * m], vertY[2 * m], vertX[2 * m + 1], vertY[2 * m + 1])
         }
     }
     private val vertX = DoubleArray(16)
@@ -414,7 +413,7 @@ class Anel : Arte {
             val hj = tH[j]
             if (hj < 1.2) {
                 fx.zero4(nomesLingua[j])
-                fx.v4(nomesCirculo[j], 0.0, 0.0, -1.0, 0.0)
+                v4em(fx.vetor("linguaC", nLingua), j, 0.0, 0.0, -1.0, 0.0)
                 continue
             }
             val a = tAng[j]

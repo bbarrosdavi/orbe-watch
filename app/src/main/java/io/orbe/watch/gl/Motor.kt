@@ -45,8 +45,27 @@ import kotlin.math.sqrt
  * primeiro passe.
  */
 internal object Motor {
-    private const val INTERVALO_NS = 30_000_000L          // um quadro sim, um não, num painel de 60 Hz
-    private const val INTERVALO_CALMO_NS = 46_000_000L    // um em três: o orbe à espera gasta menos bateria
+    // 30 quadros por segundo (um vsync sim, um não, num painel de 60 Hz) e 20 com o
+    // orbe à espera (um em três), pelos ajustes: o intervalo fica 10% abaixo do múltiplo
+    // do vsync, para um vsync que chega um pouco antes não perder a vez (30 e 45 ms)
+    @Volatile private var intervaloAtivo = intervalo(30)
+    @Volatile private var intervaloCalmo = intervalo(20)
+    private fun intervalo(qps: Int) = (1e9 / qps * 0.9).toLong()
+
+    /** Quadros por segundo do orbe parado e do orbe em sessão (ou com o dedo). */
+    fun ritmo(parado: Int, ativo: Int) {
+        intervaloCalmo = intervalo(parado.coerceIn(5, 60))
+        intervaloAtivo = intervalo(ativo.coerceIn(5, 60))
+    }
+    /** quanto o último quadro levou (0 se nenhum orbe desenhou nele) */
+    private var lacoAnteriorNs = 0L
+    private var ultimaPreviaNs = 0L
+    /** a espera máxima de uma prévia na fila sem vsync livre */
+    private const val PREVIA_ESPERA_NS = 200_000_000L
+    /** o intervalo entre vsyncs da tela (lido do display ao abrir; 60 Hz até lá) */
+    @Volatile private var periodoNs = 16_666_667L
+    /** depois do vsync anterior ao do quadro: o pedido cai no intervalo certo mesmo com atraso de agendamento */
+    private const val FOLGA_VSYNC_NS = 3_000_000L
     private const val ESPERA_GPU_NS = 250_000_000L         // o teto da espera pela GPU antes de entregar o quadro
     // Miniaturas desenhadas por quadro, em rodízio. Medido no TicWatch Pro 5: com
     // as cinco do menu no mesmo quadro, a GPU ficava ocupada de uma vez só e a
@@ -68,6 +87,13 @@ internal object Motor {
     private val previas = ArrayDeque<Previa>()
     private val principal = Handler(Looper.getMainLooper())
     private var rodando = false
+    private val aoVsync = Choreographer.FrameCallback { quadro(it) }
+
+    /** O app saiu da frente (onStop): nada desenha até [retomar]. */
+    @Volatile private var pausado = false
+    /** Ambiente: o orbe fica no último quadro; só [umQuadro] desenha outro. */
+    @Volatile private var congelado = false
+    @Volatile private var umaVez = false
     private var ultimoNs = 0L
     private var vez = 0                   // de quem é a vez no rodízio das miniaturas
 
@@ -181,7 +207,7 @@ internal object Motor {
                 return@post
             }
             alvos.add(a)
-            acordar()
+            acordarAqui()
         }
     }
 
@@ -196,16 +222,155 @@ internal object Motor {
         fio(ctx).post {
             if (contexto == EGL14.EGL_NO_CONTEXT || pedido.cancelado) return@post
             previas.addLast(Previa(pedido, cena, max(1, w), max(1, h), densidade, n, passo, pronto))
-            acordar()
+            acordarAqui()
         }
         return pedido
     }
 
-    private fun acordar() {
+    private fun acordarAqui() {
         if (rodando) return
         rodando = true
         ultimoNs = 0L
-        Choreographer.getInstance().postFrameCallback(::quadro)
+        Choreographer.getInstance().postFrameCallback(aoVsync)
+    }
+
+    /** Há o que desenhar de novo (um orbe voltou à vista, deixou de estar parado): de qualquer thread. */
+    fun acordar() {
+        handler?.post { acordarAqui() }
+    }
+
+    fun pausar() {
+        pausado = true
+    }
+
+    fun retomar() {
+        pausado = false
+        acordar()
+    }
+
+    /** Ambiente: o próximo quadro sai e a animação para nele; fora dele, tudo volta a andar. */
+    fun congelar(sim: Boolean) {
+        congelado = sim
+        umaVez = sim
+        acordar()
+    }
+
+    /** No ambiente, mais um quadro (o tique de cada minuto, o deslocamento contra marcar a tela). */
+    fun umQuadro() {
+        umaVez = true
+        handler?.post {
+            alvos.forEach { it.desenhadoEm = 0L }
+            acordarAqui()
+        }
+    }
+
+    // ── memória: o que sai com o app fora da frente, e os atlas decodificados fora da orbe-gl ──
+
+    /**
+     * Solta da GPU o que o orbe em tela não usa: os atlas e os programas das
+     * skins por onde a lista passou ([tudo] = false, 10 s depois de o app sair
+     * da frente), ou tudo, máscaras inclusive ([tudo] = true, o sistema pedindo
+     * memória). O contexto fica; o que voltar a ser pedido é refeito.
+     */
+    fun liberar(tudo: Boolean) {
+        handler?.post {
+            val of = oficina ?: return@post
+            if (contexto == EGL14.EGL_NO_CONTEXT) return@post
+            EGL14.eglMakeCurrent(tela, reserva, reserva, contexto)
+            val (nt, np) = of.soltar(if (tudo) Long.MAX_VALUE else System.nanoTime() - USO_RECENTE_NS)
+            if (tudo) alvos.forEach {
+                it.m.soltar()
+                it.desenhadoEm = 0L       // a máscara é refeita no próximo quadro dele
+            }
+            synchronized(decodificadas) { decodificadas.clear() }
+            Log.i(TAG, "memória: soltos $nt atlas e $np programas${if (tudo) " e as máscaras" else ""}")
+        }
+    }
+
+    private const val USO_RECENTE_NS = 2_000_000_000L
+    private val decodificador = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "orbe-arte").apply {
+            isDaemon = true
+            priority = Thread.MIN_PRIORITY
+        }
+    }
+    /** atlas decodificados (ou a caminho), na ordem do pedido: no máximo [DECODIFICADAS] esperando */
+    private val decodificadas = LinkedHashMap<String, java.util.concurrent.Future<Bitmap?>>()
+    private const val DECODIFICADAS = 2
+    /** os atlas já na GPU (escritos na orbe-gl, lidos na principal) */
+    private val carregados = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Decodifica o PNG do atlas da [skin] numa thread de baixa prioridade, para
+     * a orbe-gl só subir a textura quando a página da skin entrar: sem isso a
+     * decodificação (uns 150 ms no relógio) parava o quadro em que ela aparecia.
+     */
+    fun prepararArte(ctx: Context, skin: Skin) {
+        val nome = skin.arte ?: return
+        if (nome in carregados) return
+        val app = ctx.applicationContext
+        synchronized(decodificadas) {
+            if (decodificadas.containsKey(nome)) return
+            decodificadas[nome] = decodificador.submit<Bitmap?> {
+                try {
+                    Oficina.decodificar(app, skin)
+                } catch (e: Exception) {
+                    Log.w(TAG, "atlas $nome: ${e.message}")
+                    null
+                }
+            }
+            // a lista rolada depressa pede várias: só as últimas ficam esperando na memória
+            while (decodificadas.size > DECODIFICADAS) {
+                val velho = decodificadas.keys.first()
+                // já decodificando: o bitmap sai na própria fila, sem a principal esperar por ele
+                decodificadas.remove(velho)?.let { f ->
+                    if (!f.cancel(false)) decodificador.execute { runCatching { f.get() }.getOrNull()?.recycle() }
+                }
+            }
+        }
+    }
+
+    /** O atlas já decodificado (esperando o resto, se está a caminho); null se não foi pedido. */
+    internal fun arteDecodificada(nome: String): Bitmap? {
+        val f = synchronized(decodificadas) { decodificadas.remove(nome) } ?: return null
+        return runCatching { f.get() }.getOrNull()
+    }
+
+    internal fun atlasCarregado(nome: String) {
+        carregados += nome
+    }
+
+    internal fun atlasSolto(nome: String) {
+        carregados -= nome
+    }
+
+    /** Algum orbe à vista ainda anda (ou nunca foi desenhado), ou há prévia na fila. */
+    private fun precisa(): Boolean {
+        if (previas.isNotEmpty()) return true
+        for (a in alvos) {
+            if (a.view.aVista && (!a.view.parado || a.desenhadoEm == 0L) && a.w > 0 && a.h > 0) return true
+        }
+        return false
+    }
+
+    /**
+     * O próximo quadro. O vsync dele é o primeiro a partir de [ultimoNs] +
+     * [intervalo] (os vsyncs andam de [periodoNs] em [periodoNs] a partir do
+     * último quadro). A thread dorme até logo depois do vsync anterior a esse e
+     * só então pede o vsync, em vez de acordar em cada vsync do meio. A conta é
+     * pelo relógio de agora: o quadro que levou 24 ms para desenhar (o Ophanim)
+     * já gastou parte da espera, e contar do começo dele pulava um vsync.
+     */
+    private fun agendar(intervalo: Long) {
+        val c = Choreographer.getInstance()
+        if (previas.isNotEmpty()) {
+            c.postFrameCallback(aoVsync)       // a prévia usa os vsyncs livres
+            return
+        }
+        val vsyncs = (intervalo + periodoNs - 1) / periodoNs
+        val alvo = ultimoNs + vsyncs * periodoNs
+        val esperaMs = (alvo - periodoNs + FOLGA_VSYNC_NS - System.nanoTime()) / 1_000_000
+        if (esperaMs > 0) c.postFrameCallbackDelayed(aoVsync, esperaMs) else c.postFrameCallback(aoVsync)
     }
 
     fun redimensionar(view: OrbeView, w: Int, h: Int) {
@@ -264,6 +429,9 @@ internal object Motor {
         EGL14.eglMakeCurrent(tela, reserva, reserva, contexto)
         oficina = Oficina(app)
         guardado = app.getSharedPreferences("motor", Context.MODE_PRIVATE)
+        app.getSystemService(android.hardware.display.DisplayManager::class.java)
+            ?.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.refreshRate
+            ?.takeIf { it in 20f..240f }?.let { periodoNs = (1e9 / it).toLong() }
 
         // o quadrado dos dois passes
         val v = floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)
@@ -283,11 +451,14 @@ internal object Motor {
     }
 
     private fun quadro(agoraNs: Long) {
-        if (alvos.isEmpty() && previas.isEmpty()) {
-            rodando = false          // nada à vista: a thread dorme até o próximo ligar()
+        Diagnostico.vsync()
+        // nada a desenhar (fora da frente, congelado no ambiente, orbes parados ou fora de
+        // vista): a thread dorme até alguém a [acordar]
+        if (pausado || (congelado && !umaVez) || !precisa()) {
+            rodando = false
             return
         }
-        Choreographer.getInstance().postFrameCallback(::quadro)
+        val forcado = umaVez
         var calmo = true
         var livre = true             // nenhum orbe a desenhar: a prévia tem todo vsync
         for (i in alvos.indices) {
@@ -296,11 +467,18 @@ internal object Motor {
             if (!v.cena.calma) calmo = false
             if (!v.parado || alvos[i].desenhadoEm == 0L) livre = false
         }
-        val intervalo = if (calmo) INTERVALO_CALMO_NS else INTERVALO_NS
-        if (ultimoNs != 0L && agoraNs - ultimoNs < intervalo) {
+        val intervalo = if (calmo) intervaloCalmo else intervaloAtivo
+        if (!forcado && ultimoNs != 0L && agoraNs - ultimoNs < intervalo) {
             umaPrevia()              // o vsync em que os orbes não desenham
+            agendar(intervalo)
             return
         }
+        umaVez = false
+        // quadro lento (o último passou do intervalo menos um vsync): o vsync seguinte é pedido já,
+        // antes de desenhar, e o próximo quadro emenda neste, como sempre foi; pedir só no fim
+        // perdia mais um vsync (o Rei dos Ratos, ~50 ms por quadro, caía de 20 para 17)
+        val pedidoJa = lacoAnteriorNs + periodoNs > intervalo
+        if (pedidoJa) Choreographer.getInstance().postFrameCallback(aoVsync)
         val passou = if (ultimoNs == 0L) 0L else agoraNs - ultimoNs
         ultimoNs = agoraNs
         val t0 = System.nanoTime()
@@ -328,19 +506,26 @@ internal object Motor {
                 Log.e(TAG, "quadro: ${e.message}")
             }
         }
-        somaLacoMs += (System.nanoTime() - t0) / 1e6f
+        val lacoNs = System.nanoTime() - t0
+        lacoAnteriorNs = if (n > 0) lacoNs else 0L
+        somaLacoMs += lacoNs / 1e6f
         desenhados += n
-        if (livre) umaPrevia()
+        Diagnostico.laco(n, lacoNs)
+        // a prévia anda nos vsyncs em que nenhum orbe desenha; sem eles (quadro lento, ou o
+        // agendamento que só acorda na hora do quadro), uma a cada PREVIA_ESPERA_NS, logo depois do orbe
+        if (livre || (previas.isNotEmpty() && agoraNs - ultimaPreviaNs > PREVIA_ESPERA_NS)) umaPrevia()
         // só as janelas com o orbe grande na tela contam para a qualidade dele, e
         // sem prévia no meio: o atraso de um quadro dela não é dele
         if (!grande) grandeDesde = 0L else if (grandeDesde == 0L) grandeDesde = agoraNs
-        if (grande && previas.isEmpty() && agoraNs - grandeDesde >= AQUECIMENTO_NS) avaliar(agoraNs, passou, intervalo)
+        if (grande && previas.isEmpty() && agoraNs - grandeDesde >= AQUECIMENTO_NS && !forcado) avaliar(agoraNs, passou, intervalo)
         else janelaDesde = 0L
+        if (!pedidoJa) agendar(intervalo)
     }
 
     /** Um quadro da primeira prévia da fila, lido da GPU para um Bitmap. */
     private fun umaPrevia() {
         val p = previas.firstOrNull() ?: return
+        ultimaPreviaNs = System.nanoTime()
         if (p.pedido.cancelado) {
             previas.removeFirst()
             EGL14.eglMakeCurrent(tela, reserva, reserva, contexto)
@@ -375,6 +560,7 @@ internal object Motor {
         GLES30.glReadPixels(0, 0, p.w, p.h, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, buf)
         buf.position(0)
         // cor pré-multiplicada, como o Bitmap guarda; as linhas já vêm de cima (pintar)
+        Diagnostico.previa()
         val bmp = Bitmap.createBitmap(p.w, p.h, Bitmap.Config.ARGB_8888)
         bmp.copyPixelsFromBuffer(buf)
         // na memória da GPU: o menu desenha sem subir a textura a cada troca de quadro
@@ -556,6 +742,7 @@ internal object Motor {
                 figura.amostrador("atlas", 0)
             }
             GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)      // o quadrado ficou ligado no abrir()
+            Diagnostico.gl()
         }
         GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
         if (medir && Log.isLoggable(TAG, Log.VERBOSE)) {
@@ -577,7 +764,17 @@ internal object Motor {
         GLES30.glActiveTexture(GLES30.GL_TEXTURE0)
         GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, m.textura)
         pos.amostrador("source", 0)
+        // só onde o pos.frag pode pintar (a célula e o alcance do glitch): fora dela ele dá zero,
+        // o mesmo do glClear acima, então a imagem é igual com menos pixels rodando
+        val alcance = RecortePos.calcular(arte.pos, arte.recorte, wl, hl)
+            ?.let { RecortePos.emPx(it, w, h, wl, hl, invertido = saida == 0) }
+        if (alcance != null) {
+            GLES30.glEnable(GLES30.GL_SCISSOR_TEST)
+            GLES30.glScissor(alcance[0], alcance[1], alcance[2], alcance[3])
+        }
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        GLES30.glDisable(GLES30.GL_SCISSOR_TEST)
+        Diagnostico.gl()
     }
 
     /** O FBO da máscara: no tamanho da superfície; no orbe grande, vezes a qualidade. */

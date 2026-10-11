@@ -23,6 +23,11 @@ class OrbeView(ctx: Context, cenaInicial: Cena = MiniCena(Skin.OFANIM)) :
     @Volatile var adaptar = false
     /** Fica no último quadro (a miniatura com a tela rolando, a página que entra na lista). */
     @Volatile var parado = false
+        set(v) {
+            val antes = field
+            field = v
+            if (antes && !v) Motor.acordar()      // o Motor dorme sem orbe andando: volta a desenhar
+        }
     /** Fora da tela (rolado para fora, outra página) o Motor pula este orbe. */
     @Volatile var aVista = true
         private set
@@ -46,7 +51,11 @@ class OrbeView(ctx: Context, cenaInicial: Cena = MiniCena(Skin.OFANIM)) :
     }
 
     override fun onPreDraw(): Boolean {
-        aVista = isShown && getGlobalVisibleRect(visivel)
+        val v = isShown && getGlobalVisibleRect(visivel)
+        if (v != aVista) {
+            aVista = v
+            if (v) Motor.acordar()
+        }
         return true
     }
 

@@ -7,7 +7,6 @@ import androidx.compose.runtime.IntState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -62,8 +61,30 @@ internal object Previas {
     private val prontas = mutableStateMapOf<ChavePrevia, List<ImageBitmap>>()
     private val ordem = ArrayDeque<ChavePrevia>()
     private val pedidas = HashMap<Triple<Papel, Skin, Color?>, Pair<ChavePrevia, Motor.Pedido>>()
+    /** a última prévia pronta de cada lugar: fica na tela enquanto a nova (outro glitch, outro tema) sai */
+    private val ultimas = HashMap<Triple<Papel, Skin, Color?>, List<ImageBitmap>>()
+
+    /** Muda a cada [limpar]: quem desenha prévias pede de novo. */
+    val geracao = mutableIntStateOf(0)
+
+    private fun vaga(chave: ChavePrevia) = Triple(chave.papel, chave.skin, chave.cor.takeIf { chave.papel == Papel.INSTANCIA })
 
     fun quadros(chave: ChavePrevia): List<ImageBitmap>? = prontas[chave]
+
+    fun ultima(chave: ChavePrevia): List<ImageBitmap>? = ultimas[vaga(chave)]
+
+    /**
+     * Solta todas as prévias (o app fora da frente): na volta, o menu as pede de
+     * novo quando chegar perto dele. Na thread principal.
+     */
+    fun limpar() {
+        pedidas.values.forEach { it.second.cancelar() }
+        pedidas.clear()
+        prontas.clear()
+        ordem.clear()
+        ultimas.clear()
+        geracao.intValue++
+    }
 
     /**
      * Na thread principal. Cada lugar (papel e skin) tem um pedido só: o novo
@@ -71,7 +92,7 @@ internal object Previas {
      */
     fun pedir(ctx: Context, chave: ChavePrevia, densidade: Float) {
         if (chave in prontas) return
-        val vaga = Triple(chave.papel, chave.skin, chave.cor.takeIf { chave.papel == Papel.INSTANCIA })
+        val vaga = vaga(chave)
         val antes = pedidas[vaga]
         if (antes?.first == chave) return
         antes?.second?.cancelar()
@@ -89,7 +110,9 @@ internal object Previas {
         val h = (chave.altura.value * densidade).roundToInt()
         val pedido = Motor.previa(ctx, cena, w, h, densidade, min(QUADROS, chave.papel.quadros), PASSO_MS / 1000.0) { bitmaps ->
             if (pedidas[vaga]?.first == chave) pedidas.remove(vaga)
-            prontas[chave] = bitmaps.map { it.asImageBitmap() }
+            val imagens = bitmaps.map { it.asImageBitmap() }
+            prontas[chave] = imagens
+            ultimas[vaga] = imagens
             ordem.addLast(chave)
             while (ordem.size > GUARDADAS) prontas.remove(ordem.removeFirst())
         }
@@ -112,6 +135,13 @@ internal fun SkinParada(skin: Skin, cor: Color, modifier: Modifier = Modifier) {
         colorFilter = if (skin == Skin.ANEL) null else androidx.compose.ui.graphics.ColorFilter.tint(cor, androidx.compose.ui.graphics.BlendMode.Modulate),
     )
 }
+
+/**
+ * As prévias do menu podem ser pedidas: o menu está perto, ou o orbe já teve uns
+ * segundos para aquecer depois de abrir (OrbeApp). As das instâncias, de um
+ * quadro só, saem sempre.
+ */
+val LocalPreviasLiberadas = staticCompositionLocalOf { true }
 
 /** O passo das miniaturas: anda só com o menu na tela (TelaAjustes). */
 val LocalQuadro = staticCompositionLocalOf<IntState> { mutableIntStateOf(0) }
@@ -138,11 +168,12 @@ fun Miniatura(chave: ChavePrevia, modifier: Modifier = Modifier) {
     }
     val ctx = LocalContext.current
     val densidade = LocalDensity.current.density
-    LaunchedEffect(chave) { Previas.pedir(ctx, chave, densidade) }
+    val liberada = LocalPreviasLiberadas.current || chave.papel == Papel.INSTANCIA
+    val geracao = Previas.geracao.intValue
+    LaunchedEffect(chave, liberada, geracao) { if (liberada) Previas.pedir(ctx, chave, densidade) }
     val quadros = Previas.quadros(chave)
-    val ultima = remember { arrayOfNulls<List<ImageBitmap>>(1) }
-    if (quadros != null) ultima[0] = quadros
-    val mostrar = quadros ?: ultima[0]
+    // a última do lugar mora nas Previas (e não aqui): o limpar a solta mesmo com o menu montado
+    val mostrar = quadros ?: Previas.ultima(chave)
     val passo = LocalQuadro.current
     Canvas(modifier) {
         val q = mostrar ?: return@Canvas

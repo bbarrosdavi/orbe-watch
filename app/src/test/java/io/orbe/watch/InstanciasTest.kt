@@ -71,7 +71,7 @@ class InstanciasTest {
     fun aOrdemEscolhidaVemPrimeiroEAsOutrasDepois() {
         assertEquals(Skin.entries, Ajustes().skins())
         assertEquals(
-            listOf(Skin.OFANIM, Skin.ANEL, Skin.SERAFIM_GRAVURA, Skin.OFANIM_ALADO, Skin.OLHO, Skin.HUMANA),
+            listOf(Skin.OFANIM, Skin.ANEL, Skin.SERAFIM_GRAVURA, Skin.OFANIM_ALADO, Skin.OLHO, Skin.HUMANA, Skin.SERAFIM_POSITIVO),
             Ajustes(ordem = listOf("ofanim", "nao_existe", "ofanim")).skins(),
         )
     }

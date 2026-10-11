@@ -28,15 +28,20 @@ class ServicoEspera : Service() {
         startForeground(NOTIFICACAO, notificacao())
         acordado = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "orbe:espera")
-            .apply {
-                setReferenceCounted(false)
-                acquire(TETO_MS)
-            }
+            .apply { setReferenceCounted(false) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // só sai se nenhum ligar chegou depois deste pedido de parar
-        if (intent?.action == PARAR) stopSelf(startId)
+        if (intent?.action == PARAR) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        // a espera leve ("Espera leve" na aba Desempenho) fica só com o serviço e a rede
+        // pedida: o pacote que chega acorda a CPU sem ela ficar presa os dez minutos
+        val leve = intent?.getBooleanExtra(LEVE, false) == true
+        acordado?.let { if (leve) { if (it.isHeld) it.release() } else it.acquire(TETO_MS) }
+        if (leve) Log.i(TAG, "espera leve: sem trava de CPU")
         return START_NOT_STICKY
     }
 
@@ -70,8 +75,10 @@ class ServicoEspera : Service() {
         /** Quanto a tela fica acesa pela resposta, até o orbe abrir e segurar ela. */
         private const val TELA_MS = 2_000L
 
-        fun ligar(c: Context) {
-            ContextCompat.startForegroundService(c, Intent(c, ServicoEspera::class.java))
+        private const val LEVE = "leve"
+
+        fun ligar(c: Context, leve: Boolean = false) {
+            ContextCompat.startForegroundService(c, Intent(c, ServicoEspera::class.java).putExtra(LEVE, leve))
         }
 
         /**

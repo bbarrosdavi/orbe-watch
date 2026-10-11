@@ -1,6 +1,6 @@
 package io.orbe.watch.gesto
 
-import io.orbe.watch.dados.Diagnostico
+import io.orbe.watch.dados.RegistroGestos
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -60,6 +60,7 @@ class ServicoSacudida : Service(), SensorEventListener {
     private var gy = 0f
     private var gz = 0f
     private val sacudida = Sacudida()
+    @Volatile private var lote = false
     private val escopo = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     // o teto chegou com o OLED ainda aceso (o orbe segura a tela, ou o pulso
@@ -121,6 +122,7 @@ class ServicoSacudida : Service(), SensorEventListener {
                 }
                 sacudida.foraMin = it.sacudidaFora
                 sacudida.dentroMin = it.sacudidaDentro
+                lote = it.sensoresLote
             }
         }
         // trocar o modo nos Ajustes do relógio vale na hora
@@ -188,8 +190,10 @@ class ServicoSacudida : Service(), SensorEventListener {
         if (!janelaAberta) {
             sacudida.zerar()
             avisouArmado = false
-            sensores.registerListener(this, g, SensorManager.SENSOR_DELAY_GAME)
-            acel?.let { sensores.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
+            // com "Sensores em lote", a janela ao vivo também entrega em lotes curtos: menos despertares
+            val loteUs = if (lote) LOTE_VIVO_US else 0
+            sensores.registerListener(this, g, SensorManager.SENSOR_DELAY_GAME, loteUs)
+            acel?.let { sensores.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME, loteUs) }
             janelaAberta = true
             fimJanela = 0L
             Log.d(TAG, "janela aberta ($motivo)")
@@ -197,14 +201,16 @@ class ServicoSacudida : Service(), SensorEventListener {
         val fim = SystemClock.uptimeMillis() + ms
         if (fim <= fimJanela) return
         fimJanela = fim
-        acordado?.acquire(ms + 2_000)
+        // com a tela acesa a CPU já está acordada por ela: a trava só vale no escuro
+        // (a janela aberta pela inclinação); o SCREEN_OFF fecha a janela da tela acesa
+        if (!energia.isInteractive) acordado?.acquire(ms + 2_000)
         maos.removeCallbacks(fechar)
         maos.postAtTime(fechar, fim)
     }
 
     private fun fecharJanela() {
         if (!janelaAberta) return
-        if (!sacudida.armado) Diagnostico.registrar(TAG, "não armou; maior pico ignorado: %.1f".format(sacudida.maxAntesDeArmar))
+        if (!sacudida.armado) RegistroGestos.registrar(TAG, "não armou; maior pico ignorado: %.1f".format(sacudida.maxAntesDeArmar))
         sensores.unregisterListener(this)
         janelaAberta = false
         fimJanela = 0L
@@ -236,9 +242,9 @@ class ServicoSacudida : Service(), SensorEventListener {
                 val gesto = sacudida.ler(event.timestamp / 1_000_000, x, sqrt(x * x + y * y + z * z))
                 if (sacudida.armado && !avisouArmado) {
                     avisouArmado = true
-                    Diagnostico.registrar(TAG, "armado; maior pico ignorado antes: %.1f".format(sacudida.maxAntesDeArmar))
+                    RegistroGestos.registrar(TAG, "armado; maior pico ignorado antes: %.1f".format(sacudida.maxAntesDeArmar))
                 }
-                sacudida.tirarResumo()?.let { Diagnostico.registrar(TAG, "sequência: $it") }
+                sacudida.tirarResumo()?.let { RegistroGestos.registrar(TAG, "sequência: $it") }
                 // durante a calibração o gesto é medido pela tela e não abre nada; logo
                 // depois de sair do orbe pela sacudida, a volta do pulso não o reabre
                 val acabouDeSair = SystemClock.uptimeMillis() - saiuEm < SAIU_MS
@@ -256,7 +262,7 @@ class ServicoSacudida : Service(), SensorEventListener {
     private fun abrirOrbe() {
         // chamou a Hina: o orbe não abre por cima dela
         if (Vizinhos.hinaNaFrente(this)) {
-            Diagnostico.registrar(TAG, "a Hina está na tela: a sacudida não abre o orbe")
+            RegistroGestos.registrar(TAG, "a Hina está na tela: a sacudida não abre o orbe")
             return
         }
         if (!Settings.canDrawOverlays(this)) {
@@ -269,7 +275,7 @@ class ServicoSacudida : Service(), SensorEventListener {
             @Suppress("DEPRECATION")
             energia.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "orbe:gesto-tela")
                 .acquire(TELA_MS)
-            Diagnostico.registrar(TAG, "abrindo o orbe com a tela apagada")
+            RegistroGestos.registrar(TAG, "abrindo o orbe com a tela apagada")
         }
         startActivity(
             Intent(this, MainActivity::class.java)
@@ -336,6 +342,8 @@ class ServicoSacudida : Service(), SensorEventListener {
 
         /** o serviço em execução, para o orbe avisar quando entra e sai da frente */
         @Volatile private var instancia: ServicoSacudida? = null
+        /** o lote da janela ao vivo (tela acesa), com "Sensores em lote" ligado */
+        private const val LOTE_VIVO_US = 100_000
 
         /** quando o orbe saiu pela sacudida para fora ([SystemClock.uptimeMillis]) */
         @Volatile var saiuEm = -SAIU_MS
