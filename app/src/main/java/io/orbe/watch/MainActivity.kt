@@ -341,6 +341,11 @@ class MainActivity : ComponentActivity() {
         i?.getStringExtra("menu")?.let { menuPedido.value = it }
         // o orbe em tela pelo id da skin (anel, ofanim, serafim_gravura...), para medir cada um
         i?.getStringExtra("skin")?.let { id -> io.orbe.watch.orbe.Skin.entries.firstOrNull { it.id == id }?.let(vm::skin) }
+        // a ação de uma batida pelo adb: --es batida "4=live" (0-3 toques, 4-7 terminando em estalo)
+        i?.getStringExtra("batida")?.split('=')?.takeIf { it.size == 2 }?.let { (n, id) ->
+            val k = n.toIntOrNull(); val a = io.orbe.watch.dados.AcaoToque.de(id)
+            if (k != null && a != null) vm.batidaAcao(k, a)
+        }
         // as chaves da aba Desempenho, para medir sem tocar no relógio (ver OrbeViewModel.desempenhoPorAdb)
         i?.getStringExtra("desempenho")?.let(vm::desempenhoPorAdb)
         Diagnostico.verificar(this)

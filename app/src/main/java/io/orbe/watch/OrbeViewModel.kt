@@ -513,6 +513,10 @@ class OrbeViewModel(app: Application) : AndroidViewModel(app) {
         a.copy(batidasIntervalo = l[(l.indexOf(a.batidasIntervalo) + 1) % l.size])
     }
 
+    fun batidaAcao(i: Int, acao: AcaoToque) = mudar { a ->
+        if (i !in a.batidasAcoes.indices) a else a.copy(batidasAcoes = a.batidasAcoes.toMutableList().also { it[i] = acao })
+    }
+
     fun proximaBatida(i: Int) = mudar { a -> a.copy(batidasAcoes = proxima(a.batidasAcoes, i + 1, AcaoToque.CURTAS)) }
 
     /** O fora mínimo de sair, da calibração; 0 volta ao padrão. */
